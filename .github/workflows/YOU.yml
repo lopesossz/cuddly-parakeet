@@ -1,1 +1,1448 @@
-404: Not Found
+name: 'Windows RDP v27 - Writable D Drive and Persistent Taskbar'
+run-name: 'v27 RDP Server #${{ github.run_number }} - Multi-model Ollama'
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_llama31_8b:
+        description: 'Download llama3.1:8b'
+        required: false
+        type: boolean
+        default: true
+      pull_qwen35_9b:
+        description: 'Download qwen3.5:9b'
+        required: false
+        type: boolean
+        default: false
+      pull_qwen35_4b:
+        description: 'Download qwen3.5:4b'
+        required: false
+        type: boolean
+        default: false
+      install_python:
+        description: 'Install Python 3.12'
+        required: false
+        type: boolean
+        default: true
+      install_vscode:
+        description: 'Install VS Code'
+        required: false
+        type: boolean
+        default: true
+      install_winrar:
+        description: 'Install WinRAR'
+        required: false
+        type: boolean
+        default: true
+      install_qbittorrent:
+        description: 'Install qBittorrent'
+        required: false
+        type: boolean
+        default: true
+      install_moneyprinter:
+        description: 'Download MoneyPrinter'
+        required: false
+        type: boolean
+        default: false
+      install_moneyprinter_v2:
+        description: 'Download MoneyPrinterV2'
+        required: false
+        type: boolean
+        default: false
+      install_moneyprinter_turbo:
+        description: 'Download MoneyPrinterTurbo Portable 1.3.6'
+        required: false
+        type: boolean
+        default: true
+      create_shortcuts:
+        description: 'Create desktop shortcuts'
+        required: false
+        type: boolean
+        default: true
+      video_template:
+        description: 'Create video settings template'
+        required: false
+        type: choice
+        options:
+          - 'Shorts + Long'
+          - 'Shorts only'
+          - 'Long only'
+        default: 'Shorts + Long'
+      keep_alive_minutes:
+        description: 'How many minutes to keep the RDP runner alive (1-360)'
+        required: false
+        type: number
+        default: 180
+      dashboard_port:
+        description: 'Port for the remote status dashboard'
+        required: false
+        default: '2020'
+      download_port:
+        description: 'Port for downloading server files in a browser'
+        required: false
+        default: '2021'
+      auto_restart:
+        description: 'Auto-restart after completion? (yes/no)'
+        required: true
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+        default: 'yes'
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 360
+    env:
+      OLLAMA_MODELS: D:\ollama_models
+      WORKFLOW_VERSION: v27
+
+    steps:
+
+      # v16 cache schema: files + portable registry preferences/default apps, never a VM snapshot.
+      # Cache can contain user secrets. Restrict repository/workflow access.
+      - name: 'v16. Set absolute deadline and write persistence helper'
+        shell: powershell
+        run: |
+          $deadline = [DateTime]::UtcNow.AddMinutes(320).ToString('o')
+          "STATE_DEADLINE=$deadline" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "STATE_IMAGE=$env:ImageOS" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          @'
+          param([ValidateSet('Restore','Save')][string]$Mode)
+          $ErrorActionPreference = 'Stop'
+          $root = 'C:\rdp-state-v16'
+          $log = 'C:\rdp-state-v16.log'
+          $userName = 'iliya'
+          $sid = (Get-LocalUser $userName).SID.Value
+          $profileKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+          if (!(Test-Path $profileKey)) {
+              Add-Type '
+          using System;
+          using System.Text;
+          using System.Runtime.InteropServices;
+          public static class RdpProfile {
+            [DllImport("userenv.dll", CharSet=CharSet.Unicode)]
+            public static extern int CreateProfile(string sid, string name, StringBuilder path, uint size);
+          }
+          '
+              $buffer = New-Object System.Text.StringBuilder 1024
+              $hr = [RdpProfile]::CreateProfile($sid, $userName, $buffer, 1024)
+              if ($hr -ne 0) {
+                  # Hosted images can return 0x800706f7 before the profile service initializes.
+                  $profile = "C:\Users\$userName"
+                  New-Item -ItemType Directory -Force -Path $profile | Out-Null
+                  & robocopy.exe 'C:\Users\Default' $profile /E /COPY:DAT /DCOPY:DAT /XJ /R:1 /W:1 /NFL /NDL | Out-Null
+                  if ($LASTEXITCODE -ge 8) { throw "Default profile copy failed ($LASTEXITCODE) after CreateProfile returned $hr." }
+                  New-Item -Path $profileKey -Force | Out-Null
+                  New-ItemProperty -Path $profileKey -Name ProfileImagePath -Value $profile -PropertyType ExpandString -Force | Out-Null
+              }
+          }
+          $profile = (Get-ItemProperty $profileKey).ProfileImagePath
+          $profile = [Environment]::ExpandEnvironmentVariables($profile)
+          $profileFull = [IO.Path]::GetFullPath($profile).TrimEnd('\')
+          if ($profileFull -notlike 'C:\Users\*' -or $profileFull -in @('C:\Users','C:\Users\Public','C:\Users\Default')) {
+              throw "Unsafe profile path: $profile. Restore stopped to avoid wrong-user data."
+          }
+          Write-Host "Using Windows profile registered for SID $sid`: $profileFull"
+          
+          # Do not copy OS identities, registry hive files, junctions, temporary locks or models.
+          $excludedFiles = @('NTUSER.DAT*','ntuser.ini','UsrClass.dat*','pagefile.sys','swapfile.sys','hiberfil.sys','*.pid','*.lock')
+          $excludedDirs = @(
+              'D:\a','D:\actions-runner','D:\hostedtoolcache','D:\Temp',
+              'D:\$RECYCLE.BIN','D:\System Volume Information',
+              'D:\ollama_models','D:\Ollama\models','D:\Ollama\.ollama\models',
+              "$profile\.ollama\models", "$env:USERPROFILE\.ollama\models",
+              "$profile\AppData\Local\Temp", "$profile\AppData\Local\Microsoft\Windows\INetCache",
+              "$profile\AppData\Local\Packages", "$profile\AppData\Local\Microsoft\WindowsApps"
+          )
+          if ($env:OLLAMA_MODELS) { $excludedDirs += $env:OLLAMA_MODELS }
+          # Snapshot folder models at their usual .ollama/models location anywhere in D.
+          $excludedDirs += @('D:\.ollama\models')
+          function Copy-State([string]$Source,[string]$Destination,[switch]$AddOnly) {
+              if (!(Test-Path -LiteralPath $Source)) { return }
+              # Drive roots (for example D:\) already exist; New-Item rejects some
+              # provider-normalized forms such as D:\\ on hosted Windows.
+              $isDriveRoot = (($Destination.Length -in @(3,4)) -and $Destination[1] -eq ':' -and $Destination[2] -eq '\')
+              if (!$isDriveRoot -and !(Test-Path -LiteralPath $Destination)) {
+                  New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+              }
+              $copyExcludedDirs = @($excludedDirs)
+              if ($Source.TrimEnd('\') -eq "$root\drive-d") {
+                  # Old snapshots may already contain a runner tree. Exclude by
+                  # source path as well, so restore can never overwrite D:\a.
+                  $copyExcludedDirs += @(
+                      "$Source\a", "$Source\actions-runner", "$Source\hostedtoolcache", "$Source\Temp",
+                      "$Source\ollama_models", "$Source\Ollama\models", "$Source\Ollama\.ollama\models",
+                      "$Source\`$RECYCLE.BIN", "$Source\System Volume Information"
+                  )
+              }
+              $args = @($Source,$Destination,'/E','/COPY:DAT','/DCOPY:DAT','/XJ','/ZB','/R:2','/W:2','/MT:8','/NP','/NFL','/NDL',"/LOG+:$log",'/XD') + $copyExcludedDirs + @('/XF') + $excludedFiles
+              if ($AddOnly) { $args += @('/XC','/XN','/XO') }
+              & robocopy.exe @args | Out-Null
+              $code = $LASTEXITCODE
+              if ($code -ge 8) {
+                  Write-Warning "Some files could not be copied from $Source (robocopy code $code). Continuing with the usable snapshot; see $log."
+                  Add-Content $log "WARNING: partial snapshot for $Source; robocopy code $code"
+              }
+              $global:LASTEXITCODE = 0
+          }
+          
+          # Keep only portable user preferences, not SAM/SYSTEM, machine IDs or full HKLM.
+          # Export Explorer settings as small independent branches. Importing the
+          # complete HKCU\Software tree is unreliable while Windows services have
+          # parts of it open, and it caused Taskbar pins to disappear next run.
+          $userBranches = @(
+              'Control Panel',
+              'Keyboard Layout',
+              'Environment',
+              'Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband',
+              'Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced',
+              'Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts',
+              'Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3',
+              'Software\Microsoft\Windows\CurrentVersion\Themes',
+              'Software\Microsoft\Windows\DWM',
+              'Software\Microsoft\Windows\CurrentVersion\Search',
+              'Software\Microsoft\Windows\CurrentVersion\Run'
+          )
+          function Use-UserHive([scriptblock]$Action) {
+              $mounted = $false
+              $hive = $sid
+              if (!(Test-Path "Registry::HKEY_USERS\$sid")) {
+                  $hive = 'RDPStateV15'
+                  & reg.exe load "HKU\$hive" "$profile\NTUSER.DAT" | Out-Null
+                  if ($LASTEXITCODE -ne 0) { throw 'Cannot mount user settings hive.' }
+                  $mounted = $true
+              }
+              try { & $Action $hive } finally {
+                  if ($mounted) {
+                      [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+                      & reg.exe unload "HKU\$hive" | Out-Null
+                      if ($LASTEXITCODE -ne 0) { throw 'Cannot unload user settings hive.' }
+                  }
+              }
+          }
+          
+          if ($Mode -eq 'Restore') {
+              if (!(Test-Path "$root\complete.json")) {
+                  Write-Host 'No complete v16 state cache: starting fresh.'
+                  'STATE_READY=true' | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+                  exit 0
+              }
+              $manifest = Get-Content "$root\complete.json" -Raw | ConvertFrom-Json
+              if ($manifest.schema -ne 1 -or $manifest.image -ne $env:ImageOS) { throw 'Incompatible state cache.' }
+              # RDP stays blocked while files and registry preferences are restored.
+              Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' fDenyTSConnections 1
+              Copy-State "$root\user" $profile
+              Copy-State "$root\public" 'C:\Users\Public'
+              Copy-State "$root\drive-d" 'D:\'
+              Copy-State "$root\runner-ollama" "$env:USERPROFILE\.ollama"
+              Copy-State "$root\wallpapers" 'C:\Windows\Web' -AddOnly
+              & icacls.exe $profile /grant "*${sid}:(OI)(CI)F" /T /Q | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw 'Could not grant the new user SID access to the restored profile.' }
+              Use-UserHive {
+                  param($hive)
+                  foreach ($regFile in Get-ChildItem "$root\registry\user-*.reg" -ErrorAction SilentlyContinue) {
+                      $text = (Get-Content $regFile.FullName -Raw).Replace('HKEY_USERS\RDPStatePortable', "HKEY_USERS\$hive")
+                      $tempReg = Join-Path $env:RUNNER_TEMP 'rdp-user-restore.reg'
+                      $text | Set-Content $tempReg -Encoding Unicode
+                      & reg.exe import $tempReg | Out-Null
+                      if ($LASTEXITCODE -ne 0) {
+                          Write-Warning "Registry branch skipped because Windows rejected it: $($regFile.Name)"
+                          Add-Content $log "WARNING: registry restore skipped: $($regFile.Name)"
+                      }
+                  }
+              }
+              if (Test-Path "$root\default-app-associations.xml") {
+                  & dism.exe /Online /Import-DefaultAppAssociations:"$root\default-app-associations.xml" | Out-Null
+                  if ($LASTEXITCODE -ne 0) { Write-Warning 'Default app associations could not be imported on this image.' }
+              }
+              foreach ($property in $manifest.ollamaEnvironment.PSObject.Properties) {
+                  if ($property.Name -ne 'OLLAMA_MODELS') { [Environment]::SetEnvironmentVariable($property.Name,[string]$property.Value,'Machine') }
+              }
+              Write-Host "Restored portable Windows state from run $($manifest.run). Login tokens protected by the old machine may need reauthentication."
+              'STATE_READY=true' | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+              exit 0
+          }
+          
+          # A new staging directory prevents deleted source files lingering in future snapshots.
+          # This is only the validated, already-restored staging copy, not live user data.
+          if ($root -ne 'C:\rdp-state-v16') { throw 'Unsafe staging path.' }
+          if (Test-Path $root) { Remove-Item -LiteralPath 'C:\rdp-state-v16' -Recurse -Force }
+          New-Item -ItemType Directory -Force "$root\registry" | Out-Null
+          Write-Host 'Saving state now. Close applications and save documents before the keep-alive deadline.'
+          Copy-State $profile "$root\user"
+          Copy-State 'C:\Users\Public' "$root\public"
+          Copy-State 'D:\' "$root\drive-d"
+          Copy-State "$env:USERPROFILE\.ollama" "$root\runner-ollama"
+          Copy-State 'C:\Windows\Web' "$root\wallpapers"
+          Use-UserHive {
+              param($hive)
+              for ($i=0; $i -lt $userBranches.Count; $i++) {
+                  $branch = $userBranches[$i]
+                  if (!(Test-Path "Registry::HKEY_USERS\$hive\$branch")) { continue }
+                  $file = "$root\registry\user-$i.reg"
+                  & reg.exe export "HKU\$hive\$branch" $file /y | Out-Null
+                  if ($LASTEXITCODE -ne 0) { throw "Registry export failed: $branch" }
+                  (Get-Content $file -Raw).Replace("HKEY_USERS\$hive",'HKEY_USERS\RDPStatePortable') | Set-Content $file -Encoding Unicode
+              }
+          }
+          # Preserve Windows default file associations (PDF, .py, .mp4, etc.).
+          & dism.exe /Online /Export-DefaultAppAssociations:"$root\default-app-associations.xml" | Out-Null
+          if ($LASTEXITCODE -ne 0) { Write-Warning 'Default app associations export failed; per-user FileExts registry is still cached.' }
+          $ollamaEnvironment = @{}
+          foreach ($entry in [Environment]::GetEnvironmentVariables('Machine').GetEnumerator()) {
+              if ($entry.Key -like 'OLLAMA_*' -and $entry.Key -ne 'OLLAMA_MODELS') { $ollamaEnvironment[$entry.Key] = $entry.Value }
+          }
+          $size = (Get-ChildItem $root -File -Recurse -Force | Measure-Object Length -Sum).Sum
+          @{ schema=1; image=$env:ImageOS; run=$env:GITHUB_RUN_ID; savedUtc=[DateTime]::UtcNow.ToString('o'); bytes=$size;
+             ollamaEnvironment=$ollamaEnvironment
+          } | ConvertTo-Json -Depth 5 | Set-Content "$root\complete.json" -Encoding utf8
+          "Snapshot size: $([math]::Round($size/1GB,2)) GiB. Upload must finish before this run ends." | Tee-Object -FilePath $log -Append
+          'ready=true' | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $global:LASTEXITCODE = 0
+          '@ | Set-Content 'C:\rdp-state-helper-v27.ps1' -Encoding utf8
+
+
+      - name: '0. Free Runner Max Performance'
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host "FREE RUNNER MAX OPTIMIZATION"
+          Write-Host "=========================================="
+
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+
+          $ptPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"
+          if (-not (Test-Path $ptPath)) { New-Item -Path $ptPath -Force -ErrorAction SilentlyContinue | Out-Null }
+          Set-ItemProperty -Path $ptPath -Name "PowerThrottlingOff" -Value 1 -Force -ErrorAction SilentlyContinue
+
+          $coreParkingPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\0cc5b647-c1df-4637-891a-dec35c318583"
+          if (-not (Test-Path $coreParkingPath)) { New-Item -Path $coreParkingPath -Force -ErrorAction SilentlyContinue | Out-Null }
+          Set-ItemProperty -Path $coreParkingPath -Name "ValueMin" -Value 100 -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $coreParkingPath -Name "ValueMax" -Value 100 -Force -ErrorAction SilentlyContinue
+
+          $procPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\bc5038f7-23e0-4960-96da-33abaf5935ec"
+          if (-not (Test-Path $procPath)) { New-Item -Path $procPath -Force -ErrorAction SilentlyContinue | Out-Null }
+          Set-ItemProperty -Path $procPath -Name "ValueMin" -Value 100 -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $procPath -Name "ValueMax" -Value 100 -Force -ErrorAction SilentlyContinue
+
+          $CurrentProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
+          if ($CurrentProcess) { $CurrentProcess.PriorityClass = "High" }
+
+          $LargePagesPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
+          Set-ItemProperty -Path $LargePagesPath -Name "LargeSystemCache" -Value 1 -Force -ErrorAction SilentlyContinue
+
+          $ServicesToStop = @("WSearch","Spooler","SysMain","DiagTrack","dmwappushservice","MapsBroker","lfsvc","PcaSvc","WMPNetworkSvc","XblAuthManager","XblGameSave","XboxNetApiSvc")
+          foreach ($Service in $ServicesToStop) {
+              Stop-Service -Name $Service -Force -ErrorAction SilentlyContinue
+              Set-Service -Name $Service -StartupType Disabled -ErrorAction SilentlyContinue
+          }
+
+          # v16: keep runner TEMP intact (it contains active workflow scripts).
+          Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+
+          [System.Environment]::SetEnvironmentVariable("NUMBER_OF_PROCESSORS", [Environment]::ProcessorCount.ToString(), "Machine")
+          [System.Environment]::SetEnvironmentVariable("OMP_NUM_THREADS", [Environment]::ProcessorCount.ToString(), "Machine")
+          [System.Environment]::SetEnvironmentVariable("MKL_NUM_THREADS", [Environment]::ProcessorCount.ToString(), "Machine")
+          [System.Environment]::SetEnvironmentVariable("OPENBLAS_NUM_THREADS", [Environment]::ProcessorCount.ToString(), "Machine")
+
+          Write-Host "=========================================="
+          Write-Host "OPTIMIZATION COMPLETE"
+          Write-Host "=========================================="
+
+      - name: '2. Enable Remote Desktop & Create Admin Account'
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "bEnumerateHWBeforeTS" -Value 1 -Force
+
+          $ErrorActionPreference = "Stop"
+          $Username = "iliya"
+          $PasswordText = "Rdp!2024#Secure"
+          $Password = ConvertTo-SecureString $PasswordText -AsPlainText -Force
+
+          $ExistingUser = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
+          if ($null -ne $ExistingUser) { Remove-LocalUser -Name $Username -ErrorAction SilentlyContinue }
+
+          New-LocalUser -Name $Username -Password $Password -PasswordNeverExpires -UserMayNotChangePassword -Description "RDP Administrator"
+          Add-LocalGroupMember -Group "Administrators" -Member $Username
+
+          # Keep Windows in English and add Persian keyboard for the first RDP login.
+          if (Get-Command Set-WinUserLanguageList -ErrorAction SilentlyContinue) {
+              $languageList = New-WinUserLanguageList 'en-US'
+              $languageList.Add('fa-IR')
+              Set-WinUserLanguageList $languageList -Force
+              if (Get-Command Copy-UserInternationalSettingsToSystem -ErrorAction SilentlyContinue) {
+                  Copy-UserInternationalSettingsToSystem -WelcomeScreen $true -NewUser $true
+              }
+          }
+
+          # Registry fallback ensures new accounts receive English + Persian layouts.
+          $defaultHive = 'HKU\RDPDefaultProfile'
+          & reg.exe load $defaultHive 'C:\Users\Default\NTUSER.DAT' | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+              try {
+                  $preload = 'Registry::HKEY_USERS\RDPDefaultProfile\Keyboard Layout\Preload'
+                  New-Item -Path $preload -Force | Out-Null
+                  New-ItemProperty -Path $preload -Name '1' -Value '00000409' -PropertyType String -Force | Out-Null
+                  New-ItemProperty -Path $preload -Name '2' -Value '00000429' -PropertyType String -Force | Out-Null
+              } finally {
+                  [gc]::Collect()
+                  [gc]::WaitForPendingFinalizers()
+                  & reg.exe unload $defaultHive | Out-Null
+              }
+          } else {
+              Write-Warning 'Default profile hive could not be loaded; Windows language-list settings will be used.'
+          }
+
+          Write-Host "RDP ready. Username: $Username / Password: $PasswordText / Port: 3389"
+          Write-Host "Keyboard layouts ready: English (US) + Persian (Win+Space to switch)"
+
+      - name: 'v16. Restore portable Windows state cache'
+        id: restore-state
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\rdp-state-v16
+          key: windows-state-v16-${{ runner.os }}-${{ env.STATE_IMAGE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            windows-state-v16-${{ runner.os }}-${{ env.STATE_IMAGE }}-
+
+      - name: 'v16. Apply user files, D data and portable settings'
+        shell: powershell
+        run: |
+          & 'C:\rdp-state-helper-v27.ps1' -Mode Restore
+          if ($LASTEXITCODE -ne 0) { throw 'State restore failed; RDP stays disabled.' }
+
+          # Administrators normally receive a filtered token in Explorer, which
+          # causes UAC prompts when writing to D:\. Give the RDP account its own
+          # inheritable Modify ACE so ordinary file operations need no elevation.
+          $rdpUser = 'iliya'
+          & icacls.exe 'D:\' /grant:r "${rdpUser}:(OI)(CI)M" /C /Q | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+              Write-Warning "D: permissions were only partially updated (icacls code $LASTEXITCODE)."
+          } else {
+              Write-Host "D:\ is writable by $rdpUser without an administrator prompt."
+          }
+          $global:LASTEXITCODE = 0
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' fDenyTSConnections 0
+
+
+      - name: '1a. Cache Tailscale installer'
+        uses: actions/cache@v4
+        with:
+          path: C:\actions-cache\tailscale\tailscale.msi
+          key: tailscale-installer-${{ runner.os }}-stable-v1
+
+      - name: '1. Install & Connect Tailscale'
+        shell: powershell
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tailscaleCache = "C:\actions-cache\tailscale"
+          $tailscaleInstaller = Join-Path $tailscaleCache "tailscale.msi"
+          New-Item -ItemType Directory -Force -Path $tailscaleCache | Out-Null
+          if (!(Test-Path $tailscaleInstaller)) {
+              Write-Host "Downloading Tailscale installer..."
+              Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $tailscaleInstaller
+          } else {
+              Write-Host "Using cached Tailscale installer."
+          }
+
+          Write-Host "Installing Tailscale..."
+          $tailscaleInstall = Start-Process msiexec.exe -ArgumentList "/i `"$tailscaleInstaller`" /quiet /norestart" -Wait -PassThru
+          if ($tailscaleInstall.ExitCode -notin @(0, 3010)) { throw "Tailscale installer failed with exit code $($tailscaleInstall.ExitCode)." }
+          Start-Sleep -Seconds 8
+
+          $Tailscale = "C:\Program Files\Tailscale\tailscale.exe"
+          if (!(Test-Path $Tailscale)) { throw "Tailscale installation failed." }
+
+          Write-Host "Connecting to Tailscale..."
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTHKEY)) { throw "Set the TAILSCALE_AUTHKEY repository secret first." }
+          & $Tailscale up --authkey="$Env:TAILSCALE_AUTHKEY" --hostname="github-rdp-all-d-cache"
+          if ($LASTEXITCODE -ne 0) { throw "Tailscale connection failed." }
+          Start-Sleep -Seconds 10
+
+          $ts_ip = & $Tailscale ip -4
+          Write-Host "Tailscale IP : $ts_ip"
+          & $Tailscale status | Out-File "C:\tailscale-connection.log" -Encoding utf8
+
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          @("full address:s:$($ts_ip.Trim()):3389", "username:s:iliya", "prompt for credentials:i:1", "screen mode id:i:2") |
+            Set-Content (Join-Path $desktop 'RDP-Connection.rdp')
+          $rdp = New-Object -ComObject WScript.Shell
+          $shortcut = $rdp.CreateShortcut((Join-Path $desktop 'RDP-Connection.lnk'))
+          $shortcut.TargetPath = "mstsc.exe"
+          $shortcut.Arguments = (Join-Path $desktop 'RDP-Connection.rdp')
+          $shortcut.WorkingDirectory = $desktop
+          $shortcut.Save()
+
+      - name: '1b. Upload RDP connection files'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-connection-${{ github.run_number }}
+          path: |
+            C:\Users\Public\Desktop\RDP-Connection.rdp
+            C:\Users\Public\Desktop\RDP-Connection.lnk
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: '3. Cache installers'
+        uses: actions/cache@v4
+        with:
+          path: C:\actions-cache\installers
+          key: installers-${{ runner.os }}-python312-vscode-winrar-ollama-mpt-v136-v2
+
+      - name: '2b. Start setup progress dashboard'
+        continue-on-error: true
+        shell: powershell
+        env:
+          DASHBOARD_PORT: ${{ inputs.dashboard_port }}
+        run: |
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          $port = [int]$env:DASHBOARD_PORT
+          $progressHtml = "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='15'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:20%;background:#22c55e}code{color:#7dd3fc}</style></head><body><h1>RDP setup is running</h1><p id='status'>Tailscale and RDP are ready. Installing software...</p><div class='bar'><div class='fill'></div></div><p>Overall progress: 20%</p><p>This page refreshes every 15 seconds.</p></body></html>"
+          $progressHtml | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
+          $progressHtml | Set-Content (Join-Path $desktop 'RDP-STATUS.html') -Encoding utf8
+          $python = Get-ChildItem 'C:\hostedtoolcache\windows\Python\*\x64\python.exe' -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -ExpandProperty FullName -First 1
+          if (!$python) { $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
+          if (!$python) { throw 'No Python runtime is available for the setup dashboard.' }
+          $server = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','127.0.0.1','--directory',$desktop) -PassThru -WindowStyle Hidden -RedirectStandardOutput 'D:\dashboard.log' -RedirectStandardError 'D:\dashboard-error.log'
+          $server.Id | Set-Content 'D:\dashboard.pid'
+          Start-Sleep -Seconds 2
+          $tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
+          & $tailscale serve --bg --http=$port "http://127.0.0.1:$port"
+          if ($LASTEXITCODE -ne 0) { throw 'The setup dashboard Tailscale proxy could not be started.' }
+
+      - name: '3. Install Selected Software (Parallel)'
+        env:
+          INSTALL_PYTHON: ${{ inputs.install_python }}
+          INSTALL_VSCODE: ${{ inputs.install_vscode }}
+          INSTALL_WINRAR: ${{ inputs.install_winrar }}
+          INSTALL_QBITTORRENT: ${{ inputs.install_qbittorrent }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Start-Transcript -Path "D:\install.log" -Force | Out-Null
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='15'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:30%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Installing selected software in parallel...</p><div class='bar'><div class='fill'></div></div><p>Overall progress: 30%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
+          Write-Host "Installing Python, VS Code, WinRAR and qBittorrent to their default paths; Ollama to D:..."
+          New-Item -ItemType Directory -Force -Path "C:\actions-cache\installers" | Out-Null
+
+          New-Item -ItemType Directory -Force -Path "D:\Ollama" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$env:OLLAMA_MODELS" | Out-Null
+
+          [System.Environment]::SetEnvironmentVariable("OLLAMA_INSTALL_DIR", "D:\Ollama", "Machine")
+          [System.Environment]::SetEnvironmentVariable("OLLAMA_MODELS", $env:OLLAMA_MODELS, "Machine")
+
+          $jobs = @()
+          if ($env:INSTALL_PYTHON -eq "true") {
+          $pyJob = Start-Job -ScriptBlock {
+              $ErrorActionPreference = "Stop"
+              $ProgressPreference = "SilentlyContinue"
+              $installer = "C:\actions-cache\installers\python-installer.exe"
+              if (!(Test-Path $installer)) { Invoke-WebRequest "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe" -OutFile $installer }
+              $pythonInstall = Start-Process $installer -ArgumentList '/quiet', 'InstallAllUsers=1', 'TargetDir="C:\Program Files\Python312"', 'Include_pip=1', 'Include_test=0', 'PrependPath=1', 'Shortcuts=0' -Wait -PassThru
+              if ($pythonInstall.ExitCode -notin @(0, 3010)) { throw "Python installer failed with exit code $($pythonInstall.ExitCode)." }
+          }
+
+          $jobs += $pyJob
+          }
+          if ($env:INSTALL_VSCODE -eq "true") {
+          $vscodeJob = Start-Job -ScriptBlock {
+              $ErrorActionPreference = "Stop"
+              $ProgressPreference = "SilentlyContinue"
+              if (!(Test-Path "C:\Program Files\Microsoft VS Code\Code.exe")) {
+                  $installer = "C:\actions-cache\installers\vscode-system-installer.exe"
+                  if (!(Test-Path $installer)) { Invoke-WebRequest "https://update.code.visualstudio.com/latest/win32-x64/stable" -OutFile $installer }
+                  Start-Process $installer -ArgumentList '/VERYSILENT /NORESTART /MERGETASKS=!runcode' -Wait
+              }
+          }
+
+          $jobs += $vscodeJob
+          }
+          if ($env:INSTALL_WINRAR -eq "true") {
+          $winrarJob = Start-Job -ScriptBlock {
+              $ErrorActionPreference = "Stop"
+              $ProgressPreference = "SilentlyContinue"
+              $installer = "C:\actions-cache\installers\winrar.exe"
+              if (!(Test-Path $installer)) { Invoke-WebRequest "https://www.rarlab.com/rar/winrar-x64-723.exe" -OutFile $installer }
+              $process = Start-Process $installer -ArgumentList '/S' -PassThru
+              if (!$process.WaitForExit(180000)) {
+                  Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                  Write-Warning "WinRAR installation timed out and was skipped."
+              }
+          }
+
+          $jobs += $winrarJob
+          }
+          if ($env:INSTALL_QBITTORRENT -eq "true") {
+          $qbittorrentJob = Start-Job -ScriptBlock {
+              $ErrorActionPreference = "Stop"
+              $ProgressPreference = "SilentlyContinue"
+              $qbittorrent = "C:\Program Files\qBittorrent\qbittorrent.exe"
+              if (!(Test-Path $qbittorrent)) {
+                  $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+                  if ($winget) {
+                      & $winget.Source install --id qBittorrent.qBittorrent --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+                      if ($LASTEXITCODE -ne 0) { throw "WinGet qBittorrent installation failed with exit code $LASTEXITCODE." }
+                  } else {
+                      & choco install qbittorrent -y --no-progress
+                      if ($LASTEXITCODE -ne 0) { throw "Chocolatey qBittorrent installation failed with exit code $LASTEXITCODE." }
+                  }
+              }
+          }
+
+          $jobs += $qbittorrentJob
+          }
+          $ollamaJob = Start-Job -ScriptBlock {
+              $ErrorActionPreference = "Stop"
+              $ProgressPreference = "SilentlyContinue"
+              if (!(Test-Path "D:\Ollama\ollama.exe")) {
+                  $zip = "C:\actions-cache\installers\ollama.zip"
+                  if (!(Test-Path $zip)) { Invoke-WebRequest "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip" -OutFile $zip }
+                  Expand-Archive $zip -DestinationPath "D:\Ollama" -Force
+              }
+          }
+
+          $jobs += $ollamaJob
+          $maxWaitSeconds = 1800
+          $deadline = (Get-Date).AddSeconds($maxWaitSeconds)
+          while (((Get-Date) -lt $deadline) -and @($jobs | Where-Object { $_.State -in @('Running', 'NotStarted') }).Count -gt 0) {
+              $completedCount = @($jobs | Where-Object State -eq 'Completed').Count
+              $overall = [math]::Round(30 + (25 * $completedCount / [math]::Max(1, $jobs.Count)))
+              "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='10'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:$overall%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Software ready: $completedCount of $($jobs.Count)</p><div class='bar'><div class='fill'></div></div><p>Overall progress: $overall%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
+              Start-Sleep -Seconds 5
+          }
+
+          $failedJobs = @($jobs | Where-Object { $_.State -ne 'Completed' })
+          foreach ($job in $jobs) {
+              Write-Host "Job $($job.Id) State: $($job.State)"
+              if ($job.State -in @('Running', 'NotStarted')) { Stop-Job $job }
+              Receive-Job $job -ErrorAction Continue
+              Remove-Job $job -Force
+          }
+          if ($failedJobs.Count -gt 0) { throw "One or more software installations failed or timed out. See job output above." }
+
+          $pythonExe = $null
+          if ($env:INSTALL_PYTHON -eq "true") {
+              $pythonCandidates = @(
+                  "C:\Program Files\Python312\python.exe",
+                  "C:\Program Files\Python313\python.exe",
+                  "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+                  "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
+                  (Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1),
+                  (Get-ChildItem "C:\hostedtoolcache\windows\Python\*\x64\python.exe" -ErrorAction SilentlyContinue |
+                      Sort-Object FullName -Descending | Select-Object -ExpandProperty FullName -First 1)
+              )
+              $pythonExe = $pythonCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+              if (!$pythonExe) {
+                  $pythonExe = Get-ChildItem "C:\Program Files\Python*\python.exe" -ErrorAction SilentlyContinue |
+                      Select-Object -ExpandProperty FullName -First 1
+              }
+          }
+
+          $verification = @{
+              "Python" = $pythonExe
+              "VS Code" = "C:\Program Files\Microsoft VS Code\Code.exe"
+              "WinRAR" = "C:\Program Files\WinRAR\WinRAR.exe"
+              "qBittorrent" = "C:\Program Files\qBittorrent\qbittorrent.exe"
+              "Ollama" = "D:\Ollama\ollama.exe"
+          }
+          $enabled = @{ Python = ($env:INSTALL_PYTHON -eq "true"); "VS Code" = ($env:INSTALL_VSCODE -eq "true"); WinRAR = ($env:INSTALL_WINRAR -eq "true"); qBittorrent = ($env:INSTALL_QBITTORRENT -eq "true"); Ollama = $true }
+          foreach ($name in $verification.Keys) {
+              if (-not $enabled[$name]) { Write-Host "$name : SKIPPED"; continue }
+              $path = $verification[$name]
+              if ($path -and (Test-Path $path)) { Write-Host "$name : OK ($path)" }
+              elseif ($name -eq "WinRAR") { Write-Warning "WinRAR was not installed; the workflow will continue." }
+              else { throw "$name installation failed: $path is missing." }
+          }
+
+          $newPaths = @("D:\Ollama")
+          if ($pythonExe) {
+              $pythonDir = Split-Path $pythonExe -Parent
+              $newPaths += $pythonDir
+              $newPaths += (Join-Path $pythonDir "Scripts")
+          }
+          $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+          foreach ($p in $newPaths) {
+              if ($machinePath -notlike "*$p*") {
+                  $machinePath = "$machinePath;$p"
+              }
+          }
+          [System.Environment]::SetEnvironmentVariable("Path", $machinePath, "Machine")
+          $env:Path = "$machinePath;$env:Path"
+          $newPaths | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          if ($pythonExe) {
+              & $pythonExe --version
+              & $pythonExe -m ensurepip --upgrade
+              if ($LASTEXITCODE -ne 0) { throw "Python ensurepip failed." }
+              & $pythonExe -m pip install --upgrade pip --disable-pip-version-check
+              if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed." }
+              & $pythonExe -m pip --version
+              Write-Host "pip upgraded; Python and Scripts added to the Windows machine PATH."
+          }
+          if ($env:INSTALL_VSCODE -eq "true") {
+              $codeCommand = "C:\Program Files\Microsoft VS Code\bin\code.cmd"
+              $extensionsDirectory = "D:\VSCodeExtensions"
+              New-Item -ItemType Directory -Force -Path $extensionsDirectory | Out-Null
+              if (!(Test-Path $codeCommand)) { throw "VS Code command line tool is missing: $codeCommand" }
+              [System.Environment]::SetEnvironmentVariable("VSCODE_EXTENSIONS", $extensionsDirectory, "Machine")
+              $extensionInstalled = $false
+              for ($attempt = 1; $attempt -le 5; $attempt++) {
+                  Write-Host "Installing VS Code Python extension (attempt $attempt of 5)..."
+                  & $codeCommand --extensions-dir $extensionsDirectory --install-extension ms-python.python --force
+                  if ($LASTEXITCODE -eq 0) {
+                      $extensionInstalled = $true
+                      break
+                  }
+                  if ($attempt -lt 5) { Start-Sleep -Seconds (10 * $attempt) }
+              }
+              if ($extensionInstalled) {
+                  Write-Host "VS Code Python extension installed in $extensionsDirectory."
+              } else {
+                  Write-Warning "VS Code Marketplace is unavailable. Python extension was skipped; the workflow and RDP will continue. Install ms-python.python later from VS Code when the service is available."
+              }
+          }
+
+          Write-Host "All selected software installations completed."
+          "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='15'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:55%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Software ready. Preparing projects...</p><div class='bar'><div class='fill'></div></div><p>Overall progress: 55%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
+          Stop-Transcript | Out-Null
+
+      - name: '5. Download MoneyPrinter Projects'
+        if: ${{ inputs.install_moneyprinter || inputs.install_moneyprinter_v2 || inputs.install_moneyprinter_turbo }}
+        shell: powershell
+        env:
+          INSTALL_MONEYPRINTER: ${{ inputs.install_moneyprinter }}
+          INSTALL_MONEYPRINTER_V2: ${{ inputs.install_moneyprinter_v2 }}
+          INSTALL_MONEYPRINTER_TURBO: ${{ inputs.install_moneyprinter_turbo }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $Base = "D:\MoneyPrinters"
+          New-Item -ItemType Directory -Force -Path $Base | Out-Null
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='15'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:60%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Downloading selected MoneyPrinter projects...</p><div class='bar'><div class='fill'></div></div><p>Overall progress: 60%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
+
+          $repositories = @()
+          if ($env:INSTALL_MONEYPRINTER -eq 'true') {
+            $repositories += @{ Url = 'https://github.com/FujiwaraChoki/MoneyPrinter.git'; Target = 'D:\MoneyPrinters\MoneyPrinter' }
+          }
+          if ($env:INSTALL_MONEYPRINTER_V2 -eq 'true') {
+            $repositories += @{ Url = 'https://github.com/FujiwaraChoki/MoneyPrinterV2.git'; Target = 'D:\MoneyPrinters\MoneyPrinterV2' }
+          }
+          $cloneJobs = foreach ($repo in $repositories) {
+            Start-Job -ArgumentList $repo.Url, $repo.Target -ScriptBlock {
+              param($Url, $Target)
+              if (Test-Path $Target) { Write-Output "Keeping restored project: $Target"; return }
+              $env:GIT_TERMINAL_PROMPT = '0'
+              $gitOutput = & git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=120 clone --depth 1 --no-tags $Url $Target 2>&1
+              $gitExitCode = $LASTEXITCODE
+              $gitOutput | ForEach-Object { Write-Output $_.ToString() }
+              if ($gitExitCode -ne 0) { throw "Git clone failed for $Url with exit code $gitExitCode." }
+            }
+          }
+          $turboJob = $null
+          if ($env:INSTALL_MONEYPRINTER_TURBO -eq 'true') {
+          $turboJob = Start-Job -ScriptBlock {
+            $ErrorActionPreference = 'Stop'
+            $turboUrl = 'https://github.com/harry0703/MoneyPrinterTurbo/releases/download/v1.3.6/MoneyPrinterTurbo-Portable-Windows-1.3.6.7z'
+            $turboArchive = 'C:\actions-cache\installers\MoneyPrinterTurbo-Portable-Windows-1.3.6.7z'
+            $turboPart = "$turboArchive.part"
+            $turboTarget = 'D:\MoneyPrinters\MoneyPrinterTurbo'
+            if (Get-ChildItem $turboTarget -Filter 'start.bat' -Recurse -ErrorAction SilentlyContinue) { Write-Output 'Keeping restored MoneyPrinterTurbo and its settings.'; return }
+            New-Item -ItemType Directory -Force -Path (Split-Path $turboArchive), $turboTarget | Out-Null
+            if ((Test-Path $turboArchive) -and (Get-Item $turboArchive).Length -lt 10MB) {
+              Write-Output 'Removing incomplete MoneyPrinterTurbo archive from cache.'
+              Remove-Item $turboArchive -Force
+            }
+            if (!(Test-Path $turboArchive)) {
+              Remove-Item $turboPart -Force -ErrorAction SilentlyContinue
+              $previousErrorAction = $ErrorActionPreference
+              $ErrorActionPreference = 'Continue'
+              & curl.exe --silent --show-error --location --fail --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --speed-limit 1024 --speed-time 120 --output $turboPart $turboUrl
+              $curlExitCode = $LASTEXITCODE
+              $ErrorActionPreference = $previousErrorAction
+              if ($curlExitCode -ne 0) { throw "MoneyPrinterTurbo download failed with curl exit code $curlExitCode. URL: $turboUrl" }
+              if (!(Test-Path $turboPart) -or (Get-Item $turboPart).Length -lt 10MB) { throw 'MoneyPrinterTurbo download is missing or unexpectedly small.' }
+              Move-Item $turboPart $turboArchive -Force
+            } else {
+              Write-Output 'Using cached MoneyPrinterTurbo portable archive.'
+            }
+            $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+            if ($sevenZip) {
+              & $sevenZip x $turboArchive "-o$turboTarget" -y
+            } elseif (Test-Path 'C:\Program Files\WinRAR\WinRAR.exe') {
+              & 'C:\Program Files\WinRAR\WinRAR.exe' x -ibck -y $turboArchive "$turboTarget\"
+            } else {
+              throw 'Neither 7-Zip nor WinRAR is available to extract MoneyPrinterTurbo.'
+            }
+            if ($LASTEXITCODE -ne 0) { throw "MoneyPrinterTurbo extraction failed with exit code $LASTEXITCODE." }
+            if (!(Get-ChildItem $turboTarget -Force -ErrorAction SilentlyContinue)) { throw 'MoneyPrinterTurbo extraction produced an empty folder.' }
+          }
+          }
+          $projectJobs = @($cloneJobs)
+          if ($turboJob) { $projectJobs += $turboJob }
+          $deadline = (Get-Date).AddMinutes(20)
+          while ((Get-Date) -lt $deadline -and @($projectJobs | Where-Object State -in @('Running','NotStarted')).Count) {
+            $failedJobs = @($projectJobs | Where-Object State -eq 'Failed')
+            if ($failedJobs.Count) {
+              foreach ($failedJob in $failedJobs) { Receive-Job $failedJob -ErrorAction Continue }
+              $projectJobs | Where-Object State -in @('Running','NotStarted') | Stop-Job -ErrorAction SilentlyContinue
+              throw "A MoneyPrinter job failed: $($failedJobs.Id -join ', '). See its error directly above."
+            }
+            $states = ($projectJobs | ForEach-Object { "Job $($_.Id)=$($_.State)" }) -join ' | '
+            $archive = 'C:\actions-cache\installers\MoneyPrinterTurbo-Portable-Windows-1.3.6.7z'
+            $partialArchive = "$archive.part"
+            $progressFile = if (Test-Path $partialArchive) { $partialArchive } elseif (Test-Path $archive) { $archive } else { $null }
+            $downloadedMB = if ($progressFile) { [math]::Round((Get-Item $progressFile).Length / 1MB, 1) } else { 0 }
+            Write-Host "Projects: $states | Turbo downloaded: $downloadedMB MB"
+            $projectReady = @($projectJobs | Where-Object State -eq 'Completed').Count
+            $projectOverall = [math]::Round(60 + (20 * $projectReady / [math]::Max(1, $projectJobs.Count)))
+            "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='10'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:$projectOverall%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Projects ready: $projectReady of $($projectJobs.Count)</p><p>MoneyPrinterTurbo archive: $downloadedMB MB</p><div class='bar'><div class='fill'></div></div><p>Overall progress: $projectOverall%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
+            Start-Sleep 15
+          }
+          $unfinishedJobs = @($projectJobs | Where-Object State -in @('Running','NotStarted'))
+          if ($unfinishedJobs.Count) {
+            $unfinishedJobs | Stop-Job -ErrorAction SilentlyContinue
+            foreach ($job in $projectJobs) { Receive-Job $job -ErrorAction Continue }
+            throw "MoneyPrinter jobs timed out after 20 minutes. Unfinished job IDs: $($unfinishedJobs.Id -join ', ')."
+          }
+          foreach ($job in $projectJobs) {
+            if ($job.State -ne 'Completed') {
+              Receive-Job $job -ErrorAction Continue
+              throw "MoneyPrinter job $($job.Id) ended in state $($job.State)."
+            }
+            Receive-Job $job -ErrorAction Continue
+            Remove-Job $job -Force
+          }
+
+          Get-ChildItem $Base | Select-Object Name, FullName
+          "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='15'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:80%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Projects ready. Preparing Ollama models...</p><div class='bar'><div class='fill'></div></div><p>Overall progress: 80%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
+
+      - name: '5b. Download MoneyPrinterTurbo keys file'
+        if: ${{ inputs.install_moneyprinter_turbo }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $downloadDirectory = "D:\Downloads"
+          New-Item -ItemType Directory -Force -Path $downloadDirectory | Out-Null
+          if (!(Test-Path (Join-Path $downloadDirectory 'moneyprinterturbo-keys.json'))) {
+          Invoke-WebRequest 'https://raw.githubusercontent.com/defaultshomareyeke/didactic-system/refs/heads/main/moneyprinterturbo-keys.json' -OutFile (Join-Path $downloadDirectory 'moneyprinterturbo-keys.json')
+          }
+          if (!(Test-Path (Join-Path $downloadDirectory 'moneyprinterturbo-keys.json'))) { throw 'moneyprinterturbo-keys.json download failed.' }
+
+      - name: '6. Add Vazirmatn Regular to MoneyPrinterTurbo'
+        if: ${{ inputs.install_moneyprinter_turbo }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fontDirectory = 'D:\MoneyPrinters\MoneyPrinterTurbo\resource\fonts'
+          $fontPath = Join-Path $fontDirectory 'Vazirmatn-Regular.ttf'
+          $fontUrl = 'https://raw.githubusercontent.com/rastikerdar/vazirmatn/master/fonts/ttf/Vazirmatn-Regular.ttf'
+          New-Item -ItemType Directory -Force -Path $fontDirectory | Out-Null
+          if (!(Test-Path $fontPath)) { Invoke-WebRequest $fontUrl -OutFile $fontPath }
+          if (!(Test-Path $fontPath) -or (Get-Item $fontPath).Length -lt 10KB) {
+              throw 'Vazirmatn-Regular.ttf download failed or produced an invalid file.'
+          }
+          Write-Host "Vazirmatn-Regular.ttf installed only in $fontDirectory"
+
+      - name: '7. Create Desktop Shortcuts'
+        if: ${{ inputs.create_shortcuts }}
+        shell: powershell
+        env:
+          INSTALL_MONEYPRINTER_TURBO: ${{ inputs.install_moneyprinter_turbo }}
+          VIDEO_TEMPLATE: ${{ inputs.video_template }}
+        run: |
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          $ws = New-Object -ComObject WScript.Shell
+          $items = @(
+            @{ Name = 'Ollama'; Target = 'D:\Ollama\ollama.exe'; Args = 'serve'; Work = 'D:\Ollama' },
+            @{ Name = 'MoneyPrinter Projects'; Target = 'D:\MoneyPrinters'; Args = ''; Work = 'D:\MoneyPrinters' },
+            @{ Name = 'VS Code'; Target = 'C:\Program Files\Microsoft VS Code\Code.exe'; Args = '--extensions-dir "D:\VSCodeExtensions" "D:\MoneyPrinters"'; Work = 'D:\MoneyPrinters' },
+            @{ Name = 'qBittorrent'; Target = 'C:\Program Files\qBittorrent\qbittorrent.exe'; Args = ''; Work = 'C:\Program Files\qBittorrent' }
+          )
+          foreach ($item in $items) {
+            if ((Test-Path $item.Target) -or ($item.Name -eq 'MoneyPrinter Projects')) {
+              $lnk = $ws.CreateShortcut((Join-Path $desktop ($item.Name + '.lnk')))
+              $lnk.TargetPath = $item.Target; $lnk.Arguments = $item.Args; $lnk.WorkingDirectory = $item.Work; $lnk.Save()
+            }
+          }
+          @('start-ollama.bat','@echo off','start "" "D:\Ollama\ollama.exe" serve') -join "`r`n" | Set-Content (Join-Path $desktop 'start-ollama.bat')
+          if ($env:INSTALL_MONEYPRINTER_TURBO -eq 'true') {
+            $turboRoot = 'D:\MoneyPrinters\MoneyPrinterTurbo'
+            $turboStart = Get-ChildItem $turboRoot -Filter 'start.bat' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($turboStart) {
+              $turboLauncher = Join-Path $desktop 'Start-MoneyPrinterTurbo.bat'
+              @(
+                '@echo off',
+                'title MoneyPrinterTurbo',
+                "cd /d `"$($turboStart.DirectoryName)`"",
+                "call `"$($turboStart.FullName)`""
+              ) | Set-Content $turboLauncher -Encoding ascii
+              $lnk = $ws.CreateShortcut((Join-Path $desktop 'Start MoneyPrinterTurbo.lnk'))
+              $lnk.TargetPath = $turboLauncher
+              $lnk.WorkingDirectory = $turboStart.DirectoryName
+              $lnk.Save()
+            } else {
+              Write-Warning 'MoneyPrinterTurbo start.bat was not found; direct desktop shortcut was skipped.'
+            }
+          }
+
+          $shortTemplate = @'
+          Video type: YouTube Shorts
+          Aspect ratio: 9:16
+          Resolution: 1080x1920
+          Clip duration: 3 seconds
+          Match materials to script: On
+          Subtitle position: Custom
+          Custom position: 68
+          Font size: 38
+          Stroke width: 1.5
+          Encoder: libx264
+          '@
+          $longTemplate = @'
+          Video type: YouTube Long
+          Aspect ratio: 16:9
+          Resolution: 1920x1080
+          Clip duration: 4 seconds
+          Match materials to script: On
+          Subtitle position: Bottom
+          Font size: 42
+          Stroke width: 2
+          Encoder: libx264
+          '@
+          if ($env:VIDEO_TEMPLATE -in @('Shorts only','Shorts + Long')) {
+            if (!(Test-Path (Join-Path $desktop 'Video-Template-Shorts.txt'))) {
+            $shortTemplate | Set-Content (Join-Path $desktop 'Video-Template-Shorts.txt') -Encoding utf8
+            }
+          }
+          if ($env:VIDEO_TEMPLATE -in @('Long only','Shorts + Long')) {
+            if (!(Test-Path (Join-Path $desktop 'Video-Template-Long.txt'))) {
+            $longTemplate | Set-Content (Join-Path $desktop 'Video-Template-Long.txt') -Encoding utf8
+            }
+          }
+
+      - name: '7. Verify Projects & System Info'
+        shell: powershell
+        run: |
+          Write-Host "Projects on D:"
+          Get-ChildItem "D:\MoneyPrinters" -Force | Select-Object Name, Mode
+
+          Write-Host "Software on D:"
+          Get-ChildItem "D:\" -Directory | Select-Object Name
+
+          Write-Host "CPU:"
+          Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed
+          Write-Host "RAM: $([math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2)) GB"
+          Write-Host "Drives:"
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{n='Free(GB)';e={[math]::Round($_.Free/1GB,2)}}
+
+      - name: '8. Pull Ollama Models'
+        shell: powershell
+        env:
+          PULL_LLAMA31_8B: ${{ inputs.pull_llama31_8b }}
+          PULL_QWEN35_9B: ${{ inputs.pull_qwen35_9b }}
+          PULL_QWEN35_4B: ${{ inputs.pull_qwen35_4b }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          $ollamaExe = "D:\Ollama\ollama.exe"
+          if (!(Test-Path $ollamaExe)) { throw "Ollama executable is missing." }
+          $server = Start-Process -FilePath $ollamaExe -ArgumentList "serve" -PassThru -RedirectStandardOutput "D:\Ollama\server.log" -RedirectStandardError "D:\Ollama\server-error.log"
+          $ready = $false
+          for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              try {
+                  $null = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2
+                  $ready = $true
+                  break
+              } catch {
+                  if ($server.HasExited) { throw "Ollama server exited. See D:\Ollama\server-error.log" }
+                  Start-Sleep -Seconds 2
+              }
+          }
+          if (!$ready) { throw "Ollama server did not become ready." }
+          $models = @()
+          if ($env:PULL_LLAMA31_8B -eq 'true') { $models += 'llama3.1:8b' }
+          if ($env:PULL_QWEN35_9B -eq 'true') { $models += 'qwen3.5:9b' }
+          if ($env:PULL_QWEN35_4B -eq 'true') { $models += 'qwen3.5:4b' }
+          foreach ($model in $models) {
+              & $ollamaExe pull $model
+              if ($LASTEXITCODE -ne 0) { throw "Ollama model download failed: $model" }
+          }
+          Write-Host "Selected Ollama models: $($models -join ', ')"
+
+      - name: '9. Create Desktop Status & Dashboard'
+        shell: powershell
+        env:
+          PULL_LLAMA31_8B: ${{ inputs.pull_llama31_8b }}
+          PULL_QWEN35_9B: ${{ inputs.pull_qwen35_9b }}
+          PULL_QWEN35_4B: ${{ inputs.pull_qwen35_4b }}
+          KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes }}
+          DASHBOARD_PORT: ${{ inputs.dashboard_port }}
+        run: |
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          $ip = ((& "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null | Select-Object -First 1) -as [string]); if ([string]::IsNullOrWhiteSpace($ip)) { $ip = 'unavailable' } else { $ip = $ip.Trim() }
+          $keepMinutes = [int]$env:KEEP_ALIVE_MINUTES
+          if ($keepMinutes -lt 1 -or $keepMinutes -gt 360) { throw 'keep_alive_minutes must be between 1 and 360.' }
+          $shutdown = (Get-Date).AddMinutes($keepMinutes)
+          $stateDeadline = [DateTime]::Parse($env:STATE_DEADLINE).ToLocalTime()
+          if ($shutdown -gt $stateDeadline) { $shutdown = $stateDeadline }
+          $dashboardPort = [int]$env:DASHBOARD_PORT
+          $free = Get-PSDrive D | Select-Object -ExpandProperty Free
+          $freeGB = [math]::Round($free / 1GB, 2)
+          $cpuLoad = (Get-CimInstance Win32_Processor).LoadPercentage
+          $os = Get-CimInstance Win32_OperatingSystem
+          $ramUsed = [math]::Round((($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / $os.TotalVisibleMemorySize) * 100, 1)
+          $models = @()
+          if ($env:PULL_LLAMA31_8B -eq 'true') { $models += 'llama3.1:8b' }
+          if ($env:PULL_QWEN35_9B -eq 'true') { $models += 'qwen3.5:9b' }
+          if ($env:PULL_QWEN35_4B -eq 'true') { $models += 'qwen3.5:4b' }
+          $modelText = if ($models.Count) { $models -join ', ' } else { 'None' }
+          @"
+          RDP STATUS
+          ==========
+          IP: $ip
+          Port: 3389
+          Username: iliya
+          Ollama models: $modelText
+          D free: $freeGB GB
+          Scheduled shutdown: $($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))
+          Setup: Complete (100%)
+          Updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+          "@ | Set-Content (Join-Path $desktop 'RDP-STATUS.txt')
+          @"
+          <!doctype html><html><head><meta charset='utf-8'><title>RDP Status</title><meta http-equiv='refresh' content='60'><style>body{font-family:Segoe UI;background:#111;color:#eee;padding:30px}table{border-collapse:collapse}td{padding:10px 18px;border-bottom:1px solid #444}.ok{color:#6f6}</style></head><body><h1>RDP Runner Status</h1><table>
+          <tr><td>Setup</td><td class='ok'>Complete (100%)</td></tr><tr><td>IP</td><td id='ip'>$ip</td></tr><tr><td>Ollama models</td><td>$modelText</td></tr><tr><td>CPU</td><td>$cpuLoad%</td></tr><tr><td>RAM</td><td>$ramUsed%</td></tr><tr><td>D free</td><td>${freeGB} GB</td></tr><tr><td>Scheduled shutdown</td><td>$($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))</td></tr><tr><td>Updated</td><td>$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</td></tr></table><p class='ok'>Ollama dashboard is running on localhost:11434</p></body></html>
+          "@ | Set-Content (Join-Path $desktop 'RDP-STATUS.html')
+          Copy-Item (Join-Path $desktop 'RDP-STATUS.html') (Join-Path $desktop 'index.html') -Force
+
+      - name: '9. Serve Dashboard on Network'
+        continue-on-error: true
+        shell: powershell
+        env:
+          DASHBOARD_PORT: ${{ inputs.dashboard_port }}
+        run: |
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          $port = [int]$env:DASHBOARD_PORT
+          if ($port -lt 1024 -or $port -gt 65535) { throw "Dashboard port must be between 1024 and 65535." }
+          New-NetFirewallRule -DisplayName "RDP Status Dashboard $port" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Any -ErrorAction SilentlyContinue | Out-Null
+          $python = "C:\Program Files\Python312\python.exe"
+          if (!(Test-Path $python)) { $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
+          if (!$python) { throw "Python is required to serve the dashboard." }
+          $dashboardReady = $false
+          try { $dashboardReady = (Invoke-WebRequest "http://127.0.0.1:$port/RDP-STATUS.html" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 } catch {}
+          if (!$dashboardReady) {
+            $dashboard = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','127.0.0.1','--directory',$desktop) -PassThru -RedirectStandardOutput "D:\dashboard.log" -RedirectStandardError "D:\dashboard-error.log"
+            $dashboard.Id | Set-Content 'D:\dashboard.pid'
+            Start-Sleep -Seconds 2
+            if ($dashboard.HasExited) { throw "Dashboard web server failed to start." }
+          } else {
+            Write-Host 'Reusing the setup progress dashboard server.'
+          }
+          $tailscale = "C:\Program Files\Tailscale\tailscale.exe"
+          & $tailscale serve --bg --http=$port "http://127.0.0.1:$port"
+          if ($LASTEXITCODE -ne 0) { throw "Tailscale HTTP Serve failed for dashboard port $port." }
+          $ip = ((& "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null | Select-Object -First 1) -as [string]); if ([string]::IsNullOrWhiteSpace($ip)) { $ip = 'unavailable' } else { $ip = $ip.Trim() }
+          $tailnetDns = ((& $tailscale status --json | ConvertFrom-Json).Self.DNSName).TrimEnd('.')
+          if ([string]::IsNullOrWhiteSpace($tailnetDns)) { throw 'Tailscale MagicDNS name is missing.' }
+          $url = "http://$tailnetDns`:$port/"
+          Start-Sleep -Seconds 2
+          $null = Invoke-WebRequest $url -UseBasicParsing -TimeoutSec 10
+          & $tailscale serve status | Tee-Object -FilePath "D:\tailscale-serve-dashboard.log"
+          Write-Host "Dashboard URL: $url"
+          "### Remote dashboard`n[$url]($url)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          Add-Content (Join-Path $desktop 'RDP-STATUS.txt') "`nDashboard URL: $url"
+
+      - name: '9b. Start Browser Download Server'
+        continue-on-error: true
+        shell: powershell
+        env:
+          DOWNLOAD_PORT: ${{ inputs.download_port }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $downloadDirectory = "D:\Downloads"
+          $port = [int]$env:DOWNLOAD_PORT
+          if ($port -lt 1024 -or $port -gt 65535) { throw "Download port must be between 1024 and 65535." }
+          New-Item -ItemType Directory -Force -Path $downloadDirectory | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $downloadDirectory 'Shorts'), (Join-Path $downloadDirectory 'Long Videos') | Out-Null
+          $dashboardFile = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'RDP-STATUS.html'
+          if (Test-Path $dashboardFile) { Copy-Item $dashboardFile (Join-Path $downloadDirectory 'RDP-STATUS.html') -Force }
+          @'
+          param([string]$DownloadDirectory = 'D:\Downloads')
+          $hashDbPath = 'D:\download-hashes.json'
+          $hashRecords = @()
+          if (Test-Path $hashDbPath) {
+            try { $hashRecords = @(Get-Content $hashDbPath -Raw | ConvertFrom-Json) } catch { $hashRecords = @() }
+          }
+          $newRecords = @()
+          $rows = @(Get-ChildItem $DownloadDirectory -File -Recurse | Where-Object { $_.Name -notin @('index.html','RDP-STATUS.html') } | Sort-Object FullName | ForEach-Object {
+            $file = $_
+            $relative = $file.FullName.Substring($DownloadDirectory.Length).TrimStart('\')
+            $group = if ($relative -like 'Shorts\*') { 'Shorts' } elseif ($relative -like 'Long Videos\*') { 'Long Videos' } else { 'Other' }
+            $signature = "$($file.Length):$($file.LastWriteTimeUtc.Ticks)"
+            $cached = $hashRecords | Where-Object { $_.path -eq $file.FullName -and $_.signature -eq $signature } | Select-Object -First 1
+            $sha = if ($cached) { $cached.sha256 } else { (Get-FileHash $file.FullName -Algorithm SHA256).Hash }
+            $newRecords += [pscustomobject]@{ path=$file.FullName; signature=$signature; sha256=$sha }
+            $name = [Net.WebUtility]::HtmlEncode($file.Name)
+            $url = [uri]::EscapeUriString($relative.Replace('\','/'))
+            $size = if ($file.Length -ge 1GB) { '{0:N2} GB' -f ($file.Length / 1GB) } elseif ($file.Length -ge 1MB) { '{0:N1} MB' -f ($file.Length / 1MB) } else { '{0:N0} KB' -f [math]::Max(1, ($file.Length / 1KB)) }
+            $type = if ($file.Extension) { $file.Extension.TrimStart('.').ToUpperInvariant() } else { 'FILE' }
+            $shortHash = $sha.Substring(0,16) + '...'
+            "<tr><td>$group</td><td>$name</td><td>$type</td><td>$size</td><td>$($file.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))</td><td><code title='$sha'>$shortHash</code></td><td><a class='button' href='$url' download>Download</a></td></tr>"
+          }) -join "`n"
+          $newRecords | ConvertTo-Json | Set-Content $hashDbPath -Encoding utf8
+          if ([string]::IsNullOrWhiteSpace($rows)) { $rows = '<tr><td colspan="7">No files are available yet.</td></tr>' }
+          $html = "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='60'><title>RDP Downloads</title><style>body{font-family:Segoe UI;background:#10131a;color:#eef;padding:32px;max-width:1200px;margin:auto}h1{color:#7dd3fc}table{width:100%;border-collapse:collapse;background:#181d28}th,td{text-align:left;padding:12px;border-bottom:1px solid #303849}a{color:#86efac;text-decoration:none}.button{display:inline-block;background:#16a34a;color:white;padding:7px 12px;border-radius:7px}code{color:#c4b5fd}.note{color:#aab4c8}</style></head><body><h1>RDP Downloads</h1><p class='note'>Use the Shorts and Long Videos folders. This page refreshes every 60 seconds.</p><p><a href='RDP-STATUS.html'>Open server status</a></p><table><thead><tr><th>Folder</th><th>File</th><th>Type</th><th>Size</th><th>Updated</th><th>SHA-256</th><th>Action</th></tr></thead><tbody>$rows</tbody></table></body></html>"
+          $html | Set-Content (Join-Path $DownloadDirectory 'index.html') -Encoding utf8
+          '@ | Set-Content 'D:\Update-DownloadIndex.ps1' -Encoding utf8
+          & 'D:\Update-DownloadIndex.ps1' -DownloadDirectory $downloadDirectory
+          New-NetFirewallRule -DisplayName "Browser Download Server $port" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Any -ErrorAction SilentlyContinue | Out-Null
+
+          $python = "C:\Program Files\Python312\python.exe"
+          if (!(Test-Path $python)) { $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
+          if (!$python) { throw "Python is required to start the download server." }
+
+          $downloadServer = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','127.0.0.1','--directory',$downloadDirectory) -PassThru -WindowStyle Hidden -RedirectStandardOutput "D:\download-server.log" -RedirectStandardError "D:\download-server-error.log"
+          $downloadServer.Id | Set-Content 'D:\download-server.pid'
+          Start-Sleep -Seconds 2
+          if ($downloadServer.HasExited) { throw "Browser download server failed to start." }
+          $null = Invoke-WebRequest "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 5
+          $tailscale = "C:\Program Files\Tailscale\tailscale.exe"
+          & $tailscale serve --bg --http=$port "http://127.0.0.1:$port"
+          if ($LASTEXITCODE -ne 0) { throw "Tailscale HTTP Serve failed for download port $port." }
+
+          $ip = ((& "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null | Select-Object -First 1) -as [string]); if ([string]::IsNullOrWhiteSpace($ip)) { $ip = 'unavailable' } else { $ip = $ip.Trim() }
+          $tailnetDns = ((& $tailscale status --json | ConvertFrom-Json).Self.DNSName).TrimEnd('.')
+          if ([string]::IsNullOrWhiteSpace($tailnetDns)) { throw 'Tailscale MagicDNS name is missing.' }
+          $downloadUrl = "http://$tailnetDns`:$port/"
+          $dashboardFallbackUrl = "http://$tailnetDns`:$port/RDP-STATUS.html"
+          Start-Sleep -Seconds 2
+          $null = Invoke-WebRequest $downloadUrl -UseBasicParsing -TimeoutSec 10
+          & $tailscale serve status | Tee-Object -FilePath "D:\tailscale-serve-download.log"
+          Write-Host "Download server URL: $downloadUrl"
+          "### Download files from the RDP server`n[$downloadUrl]($downloadUrl)`n`nDashboard fallback: [$dashboardFallbackUrl]($dashboardFallbackUrl)`n`nPlace files in ``D:\Downloads``." | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          @"
+          [InternetShortcut]
+          URL=$downloadUrl
+          "@ | Set-Content (Join-Path $desktop 'Download-Files.url')
+          Add-Content (Join-Path $desktop 'RDP-STATUS.txt') "`nDownload URL: $downloadUrl`nDownload folder: D:\Downloads"
+
+      - name: 'v16. Show persistence deadline'
+        shell: powershell
+        run: |
+          $end = (Get-Date).AddMinutes([double]'${{ inputs.keep_alive_minutes }}')
+          $cap = [DateTime]::Parse($env:STATE_DEADLINE).ToLocalTime()
+          if ($end -gt $cap) { $end = $cap }
+          "## v16 persistence`nSave work and close applications before $($end.ToString('u')). RDP sessions will be logged off for a consistent snapshot. A 6-hour selection is shortened to reserve upload time. Cache is not a guaranteed backup." | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: '9. Keep Server Alive'
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes }}
+          DASHBOARD_PORT: ${{ inputs.dashboard_port }}
+          DOWNLOAD_PORT: ${{ inputs.download_port }}
+          PULL_LLAMA31_8B: ${{ inputs.pull_llama31_8b }}
+          PULL_QWEN35_9B: ${{ inputs.pull_qwen35_9b }}
+          PULL_QWEN35_4B: ${{ inputs.pull_qwen35_4b }}
+        shell: powershell
+        run: |
+          $python = "C:\Program Files\Python312\python.exe"
+          if (!(Test-Path $python)) { $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
+          if (!$python) { throw "Python is required to keep the web servers alive." }
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          $downloadDirectory = "D:\Downloads"
+
+          function Test-HttpServer([int]$Port, [string]$Path = '/') {
+              for ($attempt = 1; $attempt -le 3; $attempt++) {
+                  try {
+                      $response = Invoke-WebRequest "http://127.0.0.1:${Port}${Path}" -UseBasicParsing -TimeoutSec 5
+                      if ($response.StatusCode -eq 200) { return $true }
+                  } catch {}
+                  Start-Sleep -Seconds 2
+              }
+              return $false
+          }
+
+          function Test-TailscaleHttp([string]$Address, [int]$Port, [string]$Path = '/') {
+              try {
+                  $response = Invoke-WebRequest "http://${Address}:${Port}${Path}" -UseBasicParsing -TimeoutSec 8
+                  return ($response.StatusCode -eq 200)
+              } catch { return $false }
+          }
+
+          function Get-TailscaleDnsName {
+              try {
+                  $dnsName = ((& $tailscale status --json 2>$null | ConvertFrom-Json).Self.DNSName).TrimEnd('.')
+              } catch {
+                  Write-Warning "Tailscale status check failed without stopping RDP: $($_.Exception.Message)"
+                  return $null
+              }
+              if ([string]::IsNullOrWhiteSpace($dnsName)) {
+                  Write-Warning 'Tailscale MagicDNS name is temporarily unavailable.'
+                  return $null
+              }
+              return $dnsName
+          }
+
+          function Get-TailscaleIpSafe {
+              try {
+                  $value = (& $tailscale ip -4 2>$null | Select-Object -First 1)
+                  if (![string]::IsNullOrWhiteSpace([string]$value)) { return ([string]$value).Trim() }
+              } catch {}
+              return 'unavailable'
+          }
+
+          function Recover-Tailscale {
+              try {
+                  $statusText = (& $tailscale status --json 2>$null | Out-String)
+                  $state = if ($statusText.Trim()) { $statusText | ConvertFrom-Json } else { $null }
+                  if ($state -and $state.BackendState -eq 'Running') { return $true }
+              } catch {}
+              if (![string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTHKEY)) {
+                  Write-Warning 'Tailscale is in NoState; attempting authenticated reconnect.'
+                  & $tailscale up --authkey="$env:TAILSCALE_AUTHKEY" --hostname='github-rdp-all-d-cache' 2>&1 | Tee-Object -FilePath 'D:\tailscale-reconnect.log'
+                  Start-Sleep -Seconds 5
+              }
+              return $false
+          }
+
+          function Set-TailscaleHttpProxy([int]$Port) {
+              for ($attempt = 1; $attempt -le 3; $attempt++) {
+                  & $tailscale serve --bg --http=$Port "http://127.0.0.1:$Port"
+                  if ($LASTEXITCODE -eq 0) { return $true }
+                  Start-Sleep -Seconds 3
+              }
+              Write-Warning "Tailscale HTTP Serve failed for port $Port; the monitor will retry next minute."
+              return $false
+          }
+
+          function Update-DownloadIndex {
+              try {
+                  if (Test-Path 'D:\Update-DownloadIndex.ps1') {
+                      & 'D:\Update-DownloadIndex.ps1' -DownloadDirectory $downloadDirectory
+                  } else {
+                      Write-Warning 'Download index updater is missing; keeping the existing index page.'
+                  }
+              } catch {
+                  Write-Warning "Download index update failed without stopping RDP: $($_.Exception.Message)"
+              }
+          }
+
+          function Restart-HttpServer([int]$Port, [string]$Directory, [string]$LogName) {
+              $pidFile = "D:\$LogName.pid"
+              if (Test-Path $pidFile) {
+                  $serverPid = [int](Get-Content $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+                  if ($serverPid -gt 0) { Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue }
+              }
+              Start-Sleep -Seconds 1
+              $process = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$Port",'--bind','127.0.0.1','--directory',$Directory) -PassThru -WindowStyle Hidden -RedirectStandardOutput "D:\$LogName.log" -RedirectStandardError "D:\$LogName-error.log"
+              $process.Id | Set-Content $pidFile
+              Start-Sleep -Seconds 2
+              if (!(Test-HttpServer $Port)) {
+                  Write-Warning "HTTP server on port $Port could not be restarted now; the monitor will retry next minute."
+                  return $false
+              }
+              return $true
+          }
+
+          $dashboardPort = [int]$env:DASHBOARD_PORT
+          $downloadPort = [int]$env:DOWNLOAD_PORT
+          $models = @()
+          if ($env:PULL_LLAMA31_8B -eq 'true') { $models += 'llama3.1:8b' }
+          if ($env:PULL_QWEN35_9B -eq 'true') { $models += 'qwen3.5:9b' }
+          if ($env:PULL_QWEN35_4B -eq 'true') { $models += 'qwen3.5:4b' }
+          $modelText = if ($models.Count) { $models -join ', ' } else { 'None' }
+          $keepMinutes = [int]$env:KEEP_ALIVE_MINUTES
+          if ($keepMinutes -lt 1 -or $keepMinutes -gt 360) { throw 'keep_alive_minutes must be between 1 and 360.' }
+          $shutdown = (Get-Date).AddMinutes($keepMinutes)
+          $stateDeadline = [DateTime]::Parse($env:STATE_DEADLINE).ToLocalTime()
+          if ($shutdown -gt $stateDeadline) { $shutdown = $stateDeadline }
+          if (!(Test-HttpServer $dashboardPort '/RDP-STATUS.html')) {
+              try { Restart-HttpServer $dashboardPort $desktop 'dashboard' } catch { Write-Warning "Dashboard recovery failed without stopping RDP: $($_.Exception.Message)" }
+          }
+          if (!(Test-HttpServer $downloadPort)) {
+              try { Restart-HttpServer $downloadPort $downloadDirectory 'download-server' } catch { Write-Warning "Download server recovery failed without stopping RDP: $($_.Exception.Message)" }
+          }
+          $tailscale = "C:\Program Files\Tailscale\tailscale.exe"
+          Set-TailscaleHttpProxy $dashboardPort
+          Set-TailscaleHttpProxy $downloadPort
+          Recover-Tailscale | Out-Null
+          $ip = Get-TailscaleIpSafe
+          $tailnetDns = Get-TailscaleDnsName
+          Start-Sleep -Seconds 2
+          if ($tailnetDns -and !(Test-TailscaleHttp $tailnetDns $dashboardPort '/RDP-STATUS.html')) { Write-Warning "Dashboard is temporarily unavailable through Tailscale at http://${tailnetDns}:$dashboardPort/." }
+          if ($tailnetDns -and !(Test-TailscaleHttp $tailnetDns $downloadPort)) { Write-Warning "Download server is temporarily unavailable through Tailscale at http://${tailnetDns}:$downloadPort/." }
+          & $tailscale serve status | Tee-Object -FilePath "D:\tailscale-serve-status.log"
+
+          $iterations = [int]$env:KEEP_ALIVE_MINUTES
+          for ($i = 1; $i -le $iterations -and (Get-Date) -lt $shutdown; $i++) {
+              Start-Sleep -Seconds 60
+              if (!(Test-HttpServer $dashboardPort '/RDP-STATUS.html')) {
+                  Write-Warning "Dashboard stopped responding; restarting it."
+                  try { Restart-HttpServer $dashboardPort $desktop 'dashboard' } catch { Write-Warning "Dashboard recovery failed without stopping RDP: $($_.Exception.Message)" }
+              }
+              if (!(Test-HttpServer $downloadPort)) {
+                  Write-Warning "Download server stopped responding; restarting it."
+                  try { Restart-HttpServer $downloadPort $downloadDirectory 'download-server' } catch { Write-Warning "Download server recovery failed without stopping RDP: $($_.Exception.Message)" }
+              }
+              Recover-Tailscale | Out-Null
+              $ip = Get-TailscaleIpSafe
+              $tailnetDns = Get-TailscaleDnsName
+              if ($tailnetDns -and !(Test-TailscaleHttp $tailnetDns $dashboardPort '/RDP-STATUS.html')) {
+                  Write-Warning "Dashboard Tailscale proxy stopped responding; rebuilding it."
+                  Set-TailscaleHttpProxy $dashboardPort
+              }
+              if ($tailnetDns -and !(Test-TailscaleHttp $tailnetDns $downloadPort)) {
+                  Write-Warning "Download Tailscale proxy stopped responding; rebuilding it."
+                  Set-TailscaleHttpProxy $downloadPort
+              }
+              $free = Get-PSDrive D -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Free
+              if (-not $free) { $free = 0 }
+              $freeGB = [math]::Round($free / 1GB, 2)
+              $cpuLoad = (Get-CimInstance Win32_Processor).LoadPercentage
+              $ram = Get-CimInstance Win32_OperatingSystem
+              $ramUsed = [math]::Round((($ram.TotalVisibleMemorySize - $ram.FreePhysicalMemory) / $ram.TotalVisibleMemorySize) * 100, 1)
+              $tsStateText = (& $tailscale status --json 2>$null | Out-String)
+              $tsState = if ($tsStateText.Trim()) { try { $tsStateText | ConvertFrom-Json } catch { $null } } else { $null }
+              $tsOk = [bool]($tsState -and $tsState.BackendState -eq 'Running')
+              $ollamaOk = $false
+              try { $null = Invoke-RestMethod http://127.0.0.1:11434/api/tags -TimeoutSec 2; $ollamaOk = $true } catch {}
+              $ip = Get-TailscaleIpSafe
+              $updated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+              $dashboardHtml = "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='60'><title>RDP Status</title><style>body{font-family:Segoe UI;background:#111;color:#eee;padding:30px}table{border-collapse:collapse}td{padding:10px 18px;border-bottom:1px solid #444}.ok{color:#6f6}.bad{color:#f66}</style></head><body><h1>RDP Runner Status</h1><table><tr><td>IP</td><td>$ip</td></tr><tr><td>Ollama models</td><td>$modelText</td></tr><tr><td>CPU</td><td>$cpuLoad%</td></tr><tr><td>RAM</td><td>$ramUsed%</td></tr><tr><td>D free</td><td>$freeGB GB</td></tr><tr><td>Ollama</td><td>$ollamaOk</td></tr><tr><td>Scheduled shutdown</td><td>$($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))</td></tr><tr><td>Updated</td><td>$updated</td></tr></table></body></html>"
+              $dashboardHtml | Set-Content (Join-Path $desktop 'RDP-STATUS.html') -Encoding utf8
+              Copy-Item (Join-Path $desktop 'RDP-STATUS.html') (Join-Path $desktop 'index.html') -Force
+              Copy-Item (Join-Path $desktop 'RDP-STATUS.html') (Join-Path $downloadDirectory 'RDP-STATUS.html') -Force
+              Update-DownloadIndex
+              $line = "| $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | $cpuLoad% | $ramUsed% | $freeGB GB | $tsOk | $ollamaOk |"
+              $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+              if (Test-Path (Join-Path $desktop 'RDP-STATUS.txt')) { Add-Content (Join-Path $desktop 'RDP-STATUS.txt') "`nUpdated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | CPU: $cpuLoad% | RAM: $ramUsed% | Ollama: $ollamaOk" }
+              Write-Host "[$i/$iterations] Server running | CPU: $cpuLoad% | RAM: $ramUsed% | D: Free = $freeGB GB | Tailscale=$tsOk | Ollama=$ollamaOk"
+              if ($i -eq 1) { Add-Content $env:GITHUB_STEP_SUMMARY "`n### Health monitor`n| Time | CPU | RAM | D free | Tailscale | Ollama |`n|---|---:|---:|---:|---|---|" }
+              Add-Content $env:GITHUB_STEP_SUMMARY $line
+          }
+
+      - name: 'v16. Flush user session and prepare state snapshot'
+        id: snapshot-state
+        if: ${{ always() && !cancelled() && env.STATE_READY == 'true' }}
+        timeout-minutes: 20
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' fDenyTSConnections 1
+          # End only iliya sessions after the announced keep-alive deadline.
+          $sessions = foreach ($process in Get-CimInstance Win32_Process) {
+              if ($process.SessionId -gt 0) {
+                  $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction SilentlyContinue
+                  if ($owner.User -eq 'iliya') { $process.SessionId }
+              }
+          }
+          foreach ($sessionId in @($sessions | Select-Object -Unique)) { & logoff.exe $sessionId }
+          Start-Sleep -Seconds 10
+          Get-Process ollama -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq 'D:\Ollama\ollama.exe' } | Stop-Process -Force
+          & 'C:\rdp-state-helper-v27.ps1' -Mode Save
+          if ($LASTEXITCODE -ne 0) { throw 'State snapshot failed.' }
+
+      - name: 'v16. Upload complete state cache'
+        id: save-state
+        if: ${{ always() && !cancelled() && steps.snapshot-state.outputs.ready == 'true' }}
+        timeout-minutes: 18
+        uses: actions/cache/save@v4
+        with:
+          path: C:\rdp-state-v16
+          key: windows-state-v16-${{ runner.os }}-${{ env.STATE_IMAGE }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: 'v16. Report persistence result'
+        if: always()
+        shell: powershell
+        run: |
+          "## State cache result`nSnapshot: ${{ steps.snapshot-state.outcome }}`nUpload step: ${{ steps.save-state.outcome }}`nConfirm the upload log says Cache saved successfully. Failed or cancelled uploads do not preserve this session." | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+
+      - name: '10. Collect diagnostic logs'
+        if: always()
+        shell: powershell
+        run: |
+          $diagnostics = Join-Path $env:GITHUB_WORKSPACE 'diagnostics'
+          New-Item -ItemType Directory -Force -Path $diagnostics | Out-Null
+          $files = @(
+            'C:\rdp-state-v16.log',
+            'C:\tailscale-connection.log',
+            'D:\install.log',
+            'D:\Ollama\server.log',
+            'D:\Ollama\server-error.log',
+            'D:\dashboard.log',
+            'D:\dashboard-error.log',
+            'D:\download-server.log',
+            'D:\download-server-error.log',
+            'D:\tailscale-serve-dashboard.log',
+            'D:\tailscale-serve-download.log',
+            'D:\tailscale-serve-status.log'
+          )
+          foreach ($file in $files) {
+            if (Test-Path $file) { Copy-Item $file $diagnostics -Force }
+          }
+
+      - name: '10b. Upload diagnostic logs'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-diagnostics-${{ github.run_number }}
+          path: diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: '11. Auto-restart workflow (if enabled)'
+        if: ${{ !cancelled() && inputs.auto_restart == 'yes' && steps.save-state.outcome == 'success' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $wfFile = $env:GITHUB_WORKFLOW_REF.Split('@')[0].Split('/')[-1]
+
+          Write-Host "Triggering new run of $wfFile with auto_restart=yes"
+
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Write-Host "Attempt $attempt/3"
+            $response = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$wfFile/dispatches" `
+              -Method Post `
+              -Headers @{
+                Authorization = "token ${{ secrets.REPO_DISPATCH_TOKEN }}"
+                Accept = "application/vnd.github.v3+json"
+              } `
+              -ContentType "application/json" `
+              -Body (@{
+                ref = "${{ github.ref_name }}"
+                inputs = @{
+                  pull_llama31_8b = "${{ inputs.pull_llama31_8b }}"
+                  pull_qwen35_9b = "${{ inputs.pull_qwen35_9b }}"
+                  pull_qwen35_4b = "${{ inputs.pull_qwen35_4b }}"
+                  install_python = "${{ inputs.install_python }}"
+                  install_vscode = "${{ inputs.install_vscode }}"
+                  install_winrar = "${{ inputs.install_winrar }}"
+                  install_qbittorrent = "${{ inputs.install_qbittorrent }}"
+                  install_moneyprinter = "${{ inputs.install_moneyprinter }}"
+                  install_moneyprinter_v2 = "${{ inputs.install_moneyprinter_v2 }}"
+                  install_moneyprinter_turbo = "${{ inputs.install_moneyprinter_turbo }}"
+                  create_shortcuts = "${{ inputs.create_shortcuts }}"
+                  video_template = "${{ inputs.video_template }}"
+                  keep_alive_minutes = "${{ inputs.keep_alive_minutes }}"
+                  dashboard_port = "${{ inputs.dashboard_port }}"
+                  download_port = "${{ inputs.download_port }}"
+                  auto_restart = "yes"
+                }
+              } | ConvertTo-Json -Compress)
+
+            Write-Host "Dispatch accepted (HTTP 204 expected)."
+            exit 0
+          }
+
+          Write-Error "All attempts failed. Auto-restart did not complete."
+          exit 1
