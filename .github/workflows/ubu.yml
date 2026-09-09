@@ -1,1 +1,111 @@
-404: Not Found
+name: 'Simple Ubuntu SSH over Tailscale'
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_alive_minutes:
+        description: 'How many minutes to keep Ubuntu alive'
+        required: true
+        type: string
+        default: '30'
+
+jobs:
+  ssh-server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: '1. Connect to Tailscale'
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: '2. Install and configure SSH'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SSH_USERNAME='iliya'
+          SSH_PASSWORD='Rdp!2024#Secure'
+
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
+
+          if ! id "$SSH_USERNAME" >/dev/null 2>&1; then
+            sudo useradd --create-home --shell /bin/bash "$SSH_USERNAME"
+          fi
+
+          echo "$SSH_USERNAME:$SSH_PASSWORD" | sudo chpasswd
+          sudo usermod -aG sudo "$SSH_USERNAME"
+
+          echo "$SSH_USERNAME ALL=(ALL) NOPASSWD:ALL" | \
+            sudo tee /etc/sudoers.d/90-github-ssh-user >/dev/null
+          sudo chmod 0440 /etc/sudoers.d/90-github-ssh-user
+
+          sudo install -d -m 0755 /run/sshd
+          sudo install -d -m 0755 /etc/ssh/sshd_config.d
+          printf '%s\n' \
+            'PasswordAuthentication yes' \
+            'KbdInteractiveAuthentication yes' \
+            'PermitRootLogin no' \
+            'UsePAM yes' | sudo tee /etc/ssh/sshd_config.d/99-github-runner.conf >/dev/null
+
+          sudo sshd -t
+          sudo systemctl restart ssh
+          sudo systemctl is-active --quiet ssh
+
+          echo 'SSH server is ready.'
+
+      - name: '3. Create connection information'
+        id: connection
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAILSCALE_IP="$(tailscale ip -4 | head -n 1)"
+          if [[ -z "$TAILSCALE_IP" ]]; then
+            echo 'Tailscale IPv4 address is missing.' >&2
+            exit 1
+          fi
+
+          echo "ip=$TAILSCALE_IP" >> "$GITHUB_OUTPUT"
+
+          echo '=================================================='
+          echo 'SSH CONNECTION'
+          echo "IP: $TAILSCALE_IP"
+          echo 'Port: 22'
+          echo 'Username: iliya'
+          echo 'Password: Rdp!2024#Secure'
+          echo
+          echo "ssh -o StrictHostKeyChecking=accept-new iliya@$TAILSCALE_IP"
+          echo
+          echo 'Both devices must be connected to the same Tailscale network.'
+          echo '=================================================='
+
+      - name: '4. Keep alive'
+        shell: bash
+        env:
+          KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes }}
+          TAILSCALE_IP: ${{ steps.connection.outputs.ip }}
+        run: |
+          set -euo pipefail
+
+          TOTAL_MINUTES=$((10#$KEEP_ALIVE_MINUTES))
+          TOTAL_SECONDS=$((TOTAL_MINUTES * 60))
+          DEADLINE=$(( $(date +%s) + TOTAL_SECONDS ))
+
+          echo "SSH will stay alive for $TOTAL_MINUTES minute(s)."
+          echo "Connect: ssh -o StrictHostKeyChecking=accept-new iliya@$TAILSCALE_IP"
+
+          while (( $(date +%s) < DEADLINE )); do
+            if ! sudo systemctl is-active --quiet ssh; then
+              sudo systemctl restart ssh || true
+            fi
+
+            REMAINING=$((DEADLINE - $(date +%s)))
+            echo "$(date -u '+%H:%M:%S') | Remaining: $(( (REMAINING + 59) / 60 ))m | IP: $TAILSCALE_IP"
+
+            sleep 60
+          done
+
+          echo 'Done.'
