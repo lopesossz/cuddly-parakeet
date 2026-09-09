@@ -1,0 +1,15 @@
+{
+  "schema": "moneyprinterturbo.key-backup",
+  "version": 1,
+  "app_version": "1.3.6",
+  "keys": {
+    "app": {
+      "pexels_api_keys": [
+        "7MmoqbE9S65aV9TAsZOyXvthXeeypmi21FAhGK9C67zTSUpO02nJeWet"
+      ],
+      "openrouter_api_key": "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",
+      "upload_post_api_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImlsaXlhbW9oYW1tYWRpMTM4NjEwQGdtYWlsLmNvbSIsImV4cCI6NDk0MjIxMDExOCwianRpIjoiZGNiY2QyMzQtY2MxNC00MTBiLWFhMzYtOWEyOGQxYzYyOWU0In0.hBH8SnBXLr5BYlSCjTDV4FvlpZha_q8TJVGb3Ug9mTs",
+      "upload_post_username": "default"
+    }
+  }
+}
