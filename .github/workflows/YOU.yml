@@ -832,7 +832,7 @@ jobs:
           $downloadDirectory = "D:\Downloads"
           New-Item -ItemType Directory -Force -Path $downloadDirectory | Out-Null
           if (!(Test-Path (Join-Path $downloadDirectory 'moneyprinterturbo-keys.json'))) {
-          Invoke-WebRequest 'https://raw.githubusercontent.com/defaultshomareyeke/didactic-system/refs/heads/main/moneyprinterturbo-keys.json' -OutFile (Join-Path $downloadDirectory 'moneyprinterturbo-keys.json')
+          Invoke-WebRequest 'https://raw.githubusercontent.com/lopesossz/cuddly-parakeet/refs/heads/main/moneyprinterturbo-keys.json' -OutFile (Join-Path $downloadDirectory 'moneyprinterturbo-keys.json')
           }
           if (!(Test-Path (Join-Path $downloadDirectory 'moneyprinterturbo-keys.json'))) { throw 'moneyprinterturbo-keys.json download failed.' }
 
