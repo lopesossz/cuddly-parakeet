@@ -65,24 +65,32 @@ jobs:
           # Set root password inside Debian
           echo "root:$ROOT_PASS" | sudo chroot "$TARGET_DIR" chpasswd
 
-          # Configure SSH inside Debian
-          sudo mkdir -p "$TARGET_DIR/run/sshd" "$TARGET_DIR/etc/ssh/sshd_config.d" "$TARGET_DIR/root/projects"
+          # Configure SSH directly in main sshd_config inside Debian
+          sudo mkdir -p "$TARGET_DIR/run/sshd" "$TARGET_DIR/etc/ssh" "$TARGET_DIR/root/projects" "$TARGET_DIR/root/.ssh"
           
-          sudo tee "$TARGET_DIR/etc/ssh/sshd_config.d/99-root.conf" >/dev/null <<'CONF'
+          # Force settings in main sshd_config
+          sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/g' "$TARGET_DIR/etc/ssh/sshd_config" 2>/dev/null || true
+          sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/g' "$TARGET_DIR/etc/ssh/sshd_config" 2>/dev/null || true
+          sudo sed -i 's/^#*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/g' "$TARGET_DIR/etc/ssh/sshd_config" 2>/dev/null || true
+
+          sudo tee "$TARGET_DIR/etc/ssh/sshd_config.d/01-direct-root.conf" >/dev/null <<'CONF'
           PermitRootLogin yes
           PasswordAuthentication yes
           KbdInteractiveAuthentication yes
-          UsePAM yes
-          ClientAliveInterval 30
-          ClientAliveCountMax 10
+          UsePAM no
           CONF
 
           # Hostname & Hosts inside Debian
           echo "debian-runner" | sudo tee "$TARGET_DIR/etc/hostname" >/dev/null
           echo "127.0.0.1 localhost debian-runner" | sudo tee "$TARGET_DIR/etc/hosts" >/dev/null
 
-          # Start SSH inside Debian listening on port 22
-          sudo chroot "$TARGET_DIR" /usr/sbin/sshd -p 22
+          # Ensure root account has valid shell and shadow
+          sudo chroot "$TARGET_DIR" usermod -s /bin/bash root
+          echo "root:$ROOT_PASS" | sudo chroot "$TARGET_DIR" chpasswd -c SHA512
+
+          # Start SSH inside Debian on port 22
+          sudo chroot "$TARGET_DIR" /usr/sbin/sshd -p 22 -D &
+          sleep 2
 
           echo 'Pure Debian environment is live with direct Root SSH on port 22!'
 
