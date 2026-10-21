@@ -297,7 +297,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           echo '=== Saving persistent data to branch runner-storage ==='
           GIT_DIR="/tmp/git-sync"
           rm -rf "$GIT_DIR"
@@ -306,37 +306,44 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          if ! git clone "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" -b runner-storage "$GIT_DIR" 2>/dev/null; then
-            echo 'Creating orphan runner-storage branch...'
+          if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" -b runner-storage "$GIT_DIR" 2>/dev/null; then
+            cd "$GIT_DIR"
+          else
+            echo 'Cloning branch failed, initializing fresh storage...'
             cd "$GIT_DIR"
             git init
-            git checkout --orphan runner-storage
+            git checkout -b runner-storage
             git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-          else
-            cd "$GIT_DIR"
           fi
 
-          # Sync projects
+          # Sync user projects
           mkdir -p "$GIT_DIR/projects"
           if sudo test -d /home/iliya/projects; then
-            sudo cp -a /home/iliya/projects/. "$GIT_DIR/projects/" || true
+            sudo cp -a /home/iliya/projects/. "$GIT_DIR/projects/" 2>/dev/null || true
           fi
 
-          # Sync essential hermes configs and memories (excluding large cache/venv)
+          # Sync essential hermes configs and memories
           mkdir -p "$GIT_DIR/.hermes"
           if sudo test -d /home/iliya/.hermes; then
-            sudo rsync -av --exclude 'hermes-agent' --exclude 'cache' --exclude 'venvs' /home/iliya/.hermes/ "$GIT_DIR/.hermes/" 2>/dev/null || sudo cp -a /home/iliya/.hermes "$GIT_DIR/" || true
+            sudo cp -a /home/iliya/.hermes/config.yaml "$GIT_DIR/.hermes/" 2>/dev/null || true
+            sudo cp -a /home/iliya/.hermes/.env "$GIT_DIR/.hermes/" 2>/dev/null || true
+            sudo cp -a /home/iliya/.hermes/memories "$GIT_DIR/.hermes/" 2>/dev/null || true
+            sudo cp -a /home/iliya/.hermes/skills "$GIT_DIR/.hermes/" 2>/dev/null || true
           fi
+
+          # Always ensure a status file exists so commit is never completely empty
+          echo "Last run completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC') by run #${{ github.run_number }}" > "$GIT_DIR/LAST_RUN.txt"
 
           sudo chown -R "$(id -u):$(id -g)" "$GIT_DIR"
           cd "$GIT_DIR"
           git add -A
-          if ! git diff-index --quiet HEAD 2>/dev/null; then
-            git commit -m "Auto-save runner state from run #${{ github.run_number }}"
-            git push -u origin runner-storage --force
+
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git commit -m "Auto-save runner state from run #${{ github.run_number }}" || true
+            git push -u origin runner-storage --force || echo 'Push failed or no changes.'
             echo 'Persistent user data committed and pushed to runner-storage branch!'
           else
-            echo 'No changes in user projects or config; skip git commit.'
+            echo 'No changes detected; storage is already up to date.'
           fi
 
       - name: '11. Compress and prepare full home cache'
