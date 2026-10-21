@@ -1,14 +1,14 @@
-name: 'Debian Root Server (16GB RAM, 100GB+ Disk & Domain SSH)'
-run-name: 'Debian Root #${{ github.run_number }} - ${{ inputs.keep_alive_minutes }} min'
+name: 'Debian 5TB Cloud Server (16GB RAM, 5TB Google Drive & Domain SSH)'
+run-name: 'Debian 5TB #${{ github.run_number }} - ${{ inputs.keep_alive_minutes }} min'
 
 on:
   workflow_dispatch:
     inputs:
       keep_alive_minutes:
-        description: 'How many minutes to keep alive (5, 60, 180, 360)'
+        description: 'How many minutes to keep alive (default 350 min = ~6 hours)'
         required: true
         type: string
-        default: '60'
+        default: '350'
       auto_restart:
         description: 'Auto-restart workflow on finish? (yes/no)'
         required: true
@@ -37,7 +37,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== Freeing unused packages to maximize disk ==='
+          echo '=== Freeing unused packages to maximize local disk ==='
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell 2>/dev/null || true
           sudo docker system prune -af --volumes 2>/dev/null || true
           df -h /
@@ -49,29 +49,26 @@ jobs:
           ROOT_PASS='Iliya@Runner2026!'
 
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq debootstrap openssh-server zstd git jq curl autossh
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq debootstrap openssh-server zstd git jq curl autossh rclone fuse3
 
           TARGET_DIR="/debian-root"
           sudo mkdir -p "$TARGET_DIR"
 
           echo 'Bootstrapping Debian Bookworm/Trixie...'
-          sudo debootstrap --variant=minbase --include=bash,coreutils,util-linux,iproute2,iputils-ping,procps,net-tools,nano,curl,wget,ca-certificates,git,python3,python3-pip,openssh-server,sudo,zstd,locales trixie "$TARGET_DIR" http://deb.debian.org/debian
+          sudo debootstrap --variant=minbase --include=bash,coreutils,util-linux,iproute2,iputils-ping,procps,net-tools,nano,curl,wget,ca-certificates,git,python3,python3-pip,openssh-server,sudo,zstd,locales,rclone,fuse3 trixie "$TARGET_DIR" http://deb.debian.org/debian
 
-          # Mount virtual filesystems into Debian
           for fs in dev dev/pts proc sys run; do
             sudo mount --bind "/$fs" "$TARGET_DIR/$fs"
           done
 
-          # Set root password inside Debian
-          echo "root:$ROOT_PASS" | sudo chroot "$TARGET_DIR" chpasswd
+          # Configure Debian root
+          echo "root:$ROOT_PASS" | sudo chroot "$TARGET_DIR" chpasswd -c SHA512
+          sudo chroot "$TARGET_DIR" usermod -s /bin/bash root
 
-          # Configure SSH directly in main sshd_config inside Debian
-          sudo mkdir -p "$TARGET_DIR/run/sshd" "$TARGET_DIR/etc/ssh" "$TARGET_DIR/root/projects" "$TARGET_DIR/root/.ssh"
-          
-          # Force settings in main sshd_config
+          sudo mkdir -p "$TARGET_DIR/run/sshd" "$TARGET_DIR/etc/ssh" "$TARGET_DIR/root/projects" "$TARGET_DIR/root/gdrive" "$TARGET_DIR/root/.config/rclone"
+
           sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/g' "$TARGET_DIR/etc/ssh/sshd_config" 2>/dev/null || true
           sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/g' "$TARGET_DIR/etc/ssh/sshd_config" 2>/dev/null || true
-          sudo sed -i 's/^#*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/g' "$TARGET_DIR/etc/ssh/sshd_config" 2>/dev/null || true
 
           sudo tee "$TARGET_DIR/etc/ssh/sshd_config.d/01-direct-root.conf" >/dev/null <<'CONF'
           PermitRootLogin yes
@@ -80,22 +77,52 @@ jobs:
           UsePAM no
           CONF
 
-          # Hostname & Hosts inside Debian
-          echo "debian-runner" | sudo tee "$TARGET_DIR/etc/hostname" >/dev/null
-          echo "127.0.0.1 localhost debian-runner" | sudo tee "$TARGET_DIR/etc/hosts" >/dev/null
+          echo "debian-5tb-runner" | sudo tee "$TARGET_DIR/etc/hostname" >/dev/null
+          echo "127.0.0.1 localhost debian-5tb-runner" | sudo tee "$TARGET_DIR/etc/hosts" >/dev/null
 
-          # Ensure root account has valid shell and shadow
-          sudo chroot "$TARGET_DIR" usermod -s /bin/bash root
-          echo "root:$ROOT_PASS" | sudo chroot "$TARGET_DIR" chpasswd -c SHA512
-
-          # Kill host ssh if any and start Debian sshd on port 2222
+          # Start Debian sshd on port 2222
           sudo chroot "$TARGET_DIR" /usr/sbin/sshd -p 2222
           sleep 2
-          echo 'Debian sshd running on port 2222'
+          echo 'Debian SSH listening on port 2222'
 
-          echo 'Pure Debian environment is live with direct Root SSH on port 22!'
+      - name: '4. Mount 5TB Google Drive'
+        shell: bash
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_GDRIVE_CONF }}
+        run: |
+          set -uo pipefail
+          TARGET_DIR="/debian-root"
 
-      - name: '4. Restore persistent storage and root cache'
+          if [[ -n "$RCLONE_CONF" ]]; then
+            echo 'Configuring 5TB Google Drive in host and Debian...'
+            mkdir -p /root/.config/rclone "$TARGET_DIR/root/.config/rclone"
+            echo "$RCLONE_CONF" | sudo tee /root/.config/rclone/rclone.conf >/dev/null
+            echo "$RCLONE_CONF" | sudo tee "$TARGET_DIR/root/.config/rclone/rclone.conf" >/dev/null
+
+            sudo mkdir -p /mnt/gdrive "$TARGET_DIR/root/gdrive"
+
+            # Allow other users / fuse mount
+            sudo sed -i 's/^#*user_allow_other/user_allow_other/g' /etc/fuse.conf 2>/dev/null || true
+
+            echo 'Mounting Google Drive with VFS caching...'
+            sudo rclone mount gdrive: /mnt/gdrive \
+              --allow-other \
+              --vfs-cache-mode full \
+              --vfs-cache-max-age 24h \
+              --vfs-read-chunk-size 64M \
+              --buffer-size 128M \
+              --daemon
+
+            sleep 3
+            # Bind mount to Debian /root/gdrive
+            sudo mount --bind /mnt/gdrive "$TARGET_DIR/root/gdrive"
+            df -h /mnt/gdrive || true
+            echo '5TB Google Drive successfully mounted at /root/gdrive!'
+          else
+            echo 'No RCLONE_CONF secret found, skipping drive mount.'
+          fi
+
+      - name: '5. Restore persistent storage and root cache'
         id: restore-cache
         uses: actions/cache/restore@v4
         with:
@@ -105,7 +132,7 @@ jobs:
             debian-root-v1-${{ runner.os }}-
             root-home-v1-${{ runner.os }}-
 
-      - name: '5. Extract cache and pull Git persistent branch'
+      - name: '6. Extract cache and pull Git persistent branch'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -120,7 +147,6 @@ jobs:
             sudo tar -I zstd -xf "$ARCHIVE" -C "$TARGET_DIR" || true
           fi
 
-          # Pull Git storage branch directly into Debian /root/projects
           TEMP_GIT="/tmp/git-storage-pull"
           rm -rf "$TEMP_GIT"
           if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" -b runner-storage "$TEMP_GIT" 2>/dev/null; then
@@ -134,7 +160,7 @@ jobs:
             fi
           fi
 
-      - name: '6. Establish Reverse SSH Tunnel to Server 1 (Domain Access)'
+      - name: '7. Establish Reverse SSH Tunnel to Server 1 (Domain Access)'
         id: domain-tunnel
         shell: bash
         env:
@@ -147,12 +173,12 @@ jobs:
             echo "$TUNNEL_KEY" | sudo tee /root/.ssh/tunnel_id >/dev/null
             sudo chmod 600 /root/.ssh/tunnel_id
 
-            # Autossh forwarding Server 1 port 22022 -> Debian SSH port 22
+            # Forward Server 1 port 22022 -> Debian SSH port 2222
             sudo autossh -M 0 -f -N -o "StrictHostKeyChecking=no" -o "ServerAliveInterval=30" -o "ServerAliveCountMax=3" -i /root/.ssh/tunnel_id -R 0.0.0.0:22022:127.0.0.1:2222 root@3.148.103.248 || true
             echo 'Domain tunnel established! You can connect via: ssh root@sub.velqon.ir -p 22022'
           fi
 
-      - name: '7. Connection Output'
+      - name: '8. Connection Output'
         id: connection
         shell: bash
         run: |
@@ -160,17 +186,18 @@ jobs:
           TAILSCALE_IP="$(tailscale ip -4 | head -n 1 || echo 'N/A')"
           
           echo "=========================================================="
-          echo "🚀 DEBIAN ROOT SERVER READY"
+          echo "🚀 DEBIAN 5TB ROOT SERVER READY"
           echo "----------------------------------------------------------"
-          echo "OS: Debian GNU/Linux (Trixie/Bookworm)"
+          echo "OS: Debian GNU/Linux 13 (Trixie)"
           echo "User: root"
           echo "Password: Iliya@Runner2026!"
+          echo "Storage: 100GB+ SSD Local + 5TB Cloud (/root/gdrive)"
           echo "Domain SSH: ssh -p 22022 root@sub.velqon.ir"
           echo "Tailscale SSH: ssh root@$TAILSCALE_IP"
           echo "=========================================================="
 
           {
-            echo "## 🚀 Pure Debian Root Server is Ready"
+            echo "## 🚀 Debian 5TB Root Server is Ready"
             echo
             echo '### 🌐 Direct Domain SSH (No Tailscale Needed):'
             echo '```bash'
@@ -185,11 +212,12 @@ jobs:
             echo "- **OS:** \`Debian GNU/Linux 13 (trixie)\`"
             echo "- **User:** \`root\`"
             echo "- **Password:** \`Iliya@Runner2026!\`"
-            echo "- **RAM:** \`16 GB\`"
-            echo "- **Disk:** \`$(df -h / | awk 'NR==2{print $4}') free\`"
+            echo "- **Local Disk:** \`$(df -h / | awk 'NR==2{print $4}') free\`"
+            echo "- **Cloud Drive:** \`5 TB Google Drive\` mounted at \`/root/gdrive\`"
+            echo "- **Session Duration:** \`350 minutes (~6 hours)\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: '8. Keep Server Alive'
+      - name: '9. Keep Server Alive'
         shell: bash
         env:
           KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes }}
@@ -219,7 +247,7 @@ jobs:
             wait $! || true
           done
 
-      - name: '9. Save data to persistent Git storage branch'
+      - name: '10. Save data to persistent Git storage branch'
         if: ${{ always() || cancelled() }}
         shell: bash
         env:
@@ -258,7 +286,7 @@ jobs:
             sudo cp -a "$TARGET_DIR/root/.hermes/skills" "$GIT_DIR/.hermes/" 2>/dev/null || true
           fi
 
-          echo "Last run completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC') by run #${{ github.run_number }} (Debian)" > "$GIT_DIR/LAST_RUN.txt"
+          echo "Last run completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC') by run #${{ github.run_number }} (Debian 5TB)" > "$GIT_DIR/LAST_RUN.txt"
 
           sudo chown -R "$(id -u):$(id -g)" "$GIT_DIR"
           cd "$GIT_DIR"
@@ -272,7 +300,7 @@ jobs:
             echo 'Storage already up to date.'
           fi
 
-      - name: '10. Compress and save complete Debian root cache'
+      - name: '11. Compress and save complete Debian root cache'
         if: ${{ always() || cancelled() }}
         id: prepare-cache
         shell: bash
@@ -282,18 +310,18 @@ jobs:
           ARCHIVE='${{ runner.temp }}/root-archive.tar.zst'
           rm -f "$ARCHIVE"
 
-          echo 'Compressing Debian /root state with zstd...'
-          sudo tar -I 'zstd -3 -T0' --exclude="$TARGET_DIR/root/.cache" -cf "$ARCHIVE" -C "$TARGET_DIR" root || true
+          echo 'Compressing Debian /root state with zstd (excluding cloud mount)...'
+          sudo tar -I 'zstd -3 -T0' --exclude="$TARGET_DIR/root/gdrive" --exclude="$TARGET_DIR/root/.cache" -cf "$ARCHIVE" -C "$TARGET_DIR" root || true
           echo "Archive created: $(ls -lh "$ARCHIVE" | awk '{print $5}')"
 
-      - name: '11. Save Actions Cache'
+      - name: '12. Save Actions Cache'
         if: ${{ always() || cancelled() }}
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/root-archive.tar.zst
           key: debian-root-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: '12. Auto-restart workflow (if enabled)'
+      - name: '13. Auto-restart workflow (if enabled)'
         if: ${{ always() && inputs.auto_restart == 'yes' && !cancelled() }}
         shell: bash
         env:
