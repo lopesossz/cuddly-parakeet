@@ -95,7 +95,7 @@ jobs:
 
           if [[ -n "$RCLONE_CONF" ]]; then
             echo 'Configuring 5TB Google Drive in host and Debian...'
-            mkdir -p /root/.config/rclone "$TARGET_DIR/root/.config/rclone"
+            sudo mkdir -p /root/.config/rclone "$TARGET_DIR/root/.config/rclone"
             echo "$RCLONE_CONF" | sudo tee /root/.config/rclone/rclone.conf >/dev/null
             echo "$RCLONE_CONF" | sudo tee "$TARGET_DIR/root/.config/rclone/rclone.conf" >/dev/null
 
