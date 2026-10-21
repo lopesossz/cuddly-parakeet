@@ -1,4 +1,4 @@
-name: 'Debian 5TB Cloud Server (16GB RAM, 5TB Google Drive & Domain SSH)'
+name: 'Debian 5TB Cloud Server (Instant OS Boot & 5TB GDrive)'
 run-name: 'Debian 5TB #${{ github.run_number }} - ${{ inputs.keep_alive_minutes }} min'
 
 on:
@@ -33,7 +33,7 @@ jobs:
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: '2. Maximize disk space'
+      - name: '2. Maximize local disk space'
         shell: bash
         run: |
           set -euo pipefail
@@ -42,69 +42,22 @@ jobs:
           sudo docker system prune -af --volumes 2>/dev/null || true
           df -h /
 
-      - name: '3. Bootstrap pure Debian environment'
-        shell: bash
-        run: |
-          set -euo pipefail
-          ROOT_PASS='Iliya@Runner2026!'
-
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq debootstrap openssh-server zstd git jq curl autossh rclone fuse3
-
-          TARGET_DIR="/debian-root"
-          sudo mkdir -p "$TARGET_DIR"
-
-          echo 'Bootstrapping Debian Bookworm/Trixie...'
-          sudo debootstrap --variant=minbase --include=bash,coreutils,util-linux,iproute2,iputils-ping,procps,net-tools,nano,curl,wget,ca-certificates,git,python3,python3-pip,openssh-server,sudo,zstd,locales,rclone,fuse3 trixie "$TARGET_DIR" http://deb.debian.org/debian
-
-          for fs in dev dev/pts proc sys run; do
-            sudo mount --bind "/$fs" "$TARGET_DIR/$fs"
-          done
-
-          # Configure Debian root
-          echo "root:$ROOT_PASS" | sudo chroot "$TARGET_DIR" chpasswd -c SHA512
-          sudo chroot "$TARGET_DIR" usermod -s /bin/bash root
-
-          sudo mkdir -p "$TARGET_DIR/run/sshd" "$TARGET_DIR/etc/ssh" "$TARGET_DIR/root/projects" "$TARGET_DIR/root/gdrive" "$TARGET_DIR/root/.config/rclone"
-
-          sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/g' "$TARGET_DIR/etc/ssh/sshd_config" 2>/dev/null || true
-          sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/g' "$TARGET_DIR/etc/ssh/sshd_config" 2>/dev/null || true
-
-          sudo tee "$TARGET_DIR/etc/ssh/sshd_config.d/01-direct-root.conf" >/dev/null <<'CONF'
-          PermitRootLogin yes
-          PasswordAuthentication yes
-          KbdInteractiveAuthentication yes
-          UsePAM no
-          CONF
-
-          echo "debian-5tb-runner" | sudo tee "$TARGET_DIR/etc/hostname" >/dev/null
-          echo "127.0.0.1 localhost debian-5tb-runner" | sudo tee "$TARGET_DIR/etc/hosts" >/dev/null
-
-          # Start Debian sshd on port 2222
-          sudo chroot "$TARGET_DIR" /usr/sbin/sshd -p 2222
-          sleep 2
-          echo 'Debian SSH listening on port 2222'
-
-      - name: '4. Mount 5TB Google Drive'
+      - name: '3. Mount 5TB Google Drive'
+        id: mount-drive
         shell: bash
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_GDRIVE_CONF }}
         run: |
           set -uo pipefail
-          TARGET_DIR="/debian-root"
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rclone fuse3 zstd openssh-server autossh debootstrap
 
           if [[ -n "$RCLONE_CONF" ]]; then
-            echo 'Configuring 5TB Google Drive in host and Debian...'
-            sudo mkdir -p /root/.config/rclone "$TARGET_DIR/root/.config/rclone"
+            sudo mkdir -p /root/.config/rclone /mnt/gdrive
             echo "$RCLONE_CONF" | sudo tee /root/.config/rclone/rclone.conf >/dev/null
-            echo "$RCLONE_CONF" | sudo tee "$TARGET_DIR/root/.config/rclone/rclone.conf" >/dev/null
-
-            sudo mkdir -p /mnt/gdrive "$TARGET_DIR/root/gdrive"
-
-            # Allow other users / fuse mount
             sudo sed -i 's/^#*user_allow_other/user_allow_other/g' /etc/fuse.conf 2>/dev/null || true
 
-            echo 'Mounting Google Drive with VFS caching...'
+            echo 'Mounting 5TB Google Drive via Rclone...'
             sudo rclone mount gdrive: /mnt/gdrive \
               --allow-other \
               --vfs-cache-mode full \
@@ -113,26 +66,69 @@ jobs:
               --buffer-size 128M \
               --daemon
 
-            sleep 3
-            # Bind mount to Debian /root/gdrive
-            sudo mount --bind /mnt/gdrive "$TARGET_DIR/root/gdrive"
-            df -h /mnt/gdrive || true
-            echo '5TB Google Drive successfully mounted at /root/gdrive!'
+            sleep 4
+            df -h /mnt/gdrive
+            echo 'Google Drive mounted successfully!'
+            echo 'mounted=true' >> "$GITHUB_OUTPUT"
           else
-            echo 'No RCLONE_CONF secret found, skipping drive mount.'
+            echo 'mounted=false' >> "$GITHUB_OUTPUT"
           fi
 
-      - name: '5. Restore persistent storage and root cache'
-        id: restore-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/root-archive.tar.zst
-          key: debian-root-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            debian-root-v1-${{ runner.os }}-
-            root-home-v1-${{ runner.os }}-
+      - name: '4. Instant Boot Debian 13 from Google Drive Image'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_DIR="/debian-root"
+          IMAGE_PATH="/mnt/gdrive/runner_os/debian_base.tar.zst"
+          ROOT_PASS='Iliya@Runner2026!'
 
-      - name: '6. Extract cache and pull Git persistent branch'
+          sudo mkdir -p "$TARGET_DIR"
+
+          if [[ -f "$IMAGE_PATH" ]]; then
+            echo 'Found pre-built Debian image on Google Drive! Extracting in seconds...'
+            sudo tar -I zstd -xf "$IMAGE_PATH" -C "$TARGET_DIR"
+            echo 'Debian 13 successfully restored from Google Drive cloud image!'
+          else
+            echo 'First run: Bootstrapping fresh Debian 13 Trixie...'
+            sudo debootstrap --variant=minbase --include=bash,coreutils,util-linux,iproute2,iputils-ping,procps,net-tools,nano,curl,wget,ca-certificates,git,python3,python3-pip,openssh-server,sudo,zstd,locales,rclone,fuse3 trixie "$TARGET_DIR" http://deb.debian.org/debian
+
+            echo "root:$ROOT_PASS" | sudo chroot "$TARGET_DIR" chpasswd -c SHA512
+            sudo chroot "$TARGET_DIR" usermod -s /bin/bash root
+            sudo mkdir -p "$TARGET_DIR/run/sshd" "$TARGET_DIR/etc/ssh" "$TARGET_DIR/root/projects" "$TARGET_DIR/root/gdrive" "$TARGET_DIR/root/.config/rclone"
+
+            sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/g' "$TARGET_DIR/etc/ssh/sshd_config" 2>/dev/null || true
+            sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/g' "$TARGET_DIR/etc/ssh/sshd_config" 2>/dev/null || true
+
+            sudo tee "$TARGET_DIR/etc/ssh/sshd_config.d/01-direct-root.conf" >/dev/null <<'CONF'
+            PermitRootLogin yes
+            PasswordAuthentication yes
+            KbdInteractiveAuthentication yes
+            UsePAM no
+            CONF
+
+            echo "debian-5tb-runner" | sudo tee "$TARGET_DIR/etc/hostname" >/dev/null
+            echo "127.0.0.1 localhost debian-5tb-runner" | sudo tee "$TARGET_DIR/etc/hosts" >/dev/null
+
+            # Save base image to Google Drive for all future runs
+            sudo mkdir -p /mnt/gdrive/runner_os
+            echo 'Saving Debian base image to Google Drive for instant next boot...'
+            sudo tar -I 'zstd -3 -T0' --exclude="$TARGET_DIR/root/gdrive" -cf "$IMAGE_PATH" -C "$TARGET_DIR" . || true
+            echo 'Base image saved to Google Drive!'
+          fi
+
+          # Mount virtual filesystems and Google Drive into Debian
+          for fs in dev dev/pts proc sys run; do
+            sudo mount --bind "/$fs" "$TARGET_DIR/$fs"
+          done
+          sudo mkdir -p "$TARGET_DIR/root/gdrive"
+          sudo mount --bind /mnt/gdrive "$TARGET_DIR/root/gdrive"
+
+          # Start Debian SSH on port 2222
+          sudo chroot "$TARGET_DIR" /usr/sbin/sshd -p 2222
+          sleep 2
+          echo 'Pure Debian Root SSH ready on port 2222!'
+
+      - name: '5. Restore persistent storage and git projects'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -140,13 +136,6 @@ jobs:
         run: |
           set -uo pipefail
           TARGET_DIR="/debian-root"
-          ARCHIVE='${{ runner.temp }}/root-archive.tar.zst'
-
-          if [[ -f "$ARCHIVE" ]]; then
-            echo 'Extracting compressed Debian root cache...'
-            sudo tar -I zstd -xf "$ARCHIVE" -C "$TARGET_DIR" || true
-          fi
-
           TEMP_GIT="/tmp/git-storage-pull"
           rm -rf "$TEMP_GIT"
           if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" -b runner-storage "$TEMP_GIT" 2>/dev/null; then
@@ -160,7 +149,7 @@ jobs:
             fi
           fi
 
-      - name: '7. Establish Reverse SSH Tunnel to Server 1 (Domain Access)'
+      - name: '6. Establish Reverse SSH Tunnel to Server 1 (Domain Access)'
         id: domain-tunnel
         shell: bash
         env:
@@ -178,7 +167,7 @@ jobs:
             echo 'Domain tunnel established! You can connect via: ssh root@sub.velqon.ir -p 22022'
           fi
 
-      - name: '8. Connection Output'
+      - name: '7. Connection Output'
         id: connection
         shell: bash
         run: |
@@ -186,12 +175,13 @@ jobs:
           TAILSCALE_IP="$(tailscale ip -4 | head -n 1 || echo 'N/A')"
           
           echo "=========================================================="
-          echo "🚀 DEBIAN 5TB ROOT SERVER READY"
+          echo "🚀 DEBIAN 5TB CLOUD SERVER READY"
           echo "----------------------------------------------------------"
           echo "OS: Debian GNU/Linux 13 (Trixie)"
           echo "User: root"
           echo "Password: Iliya@Runner2026!"
-          echo "Storage: 100GB+ SSD Local + 5TB Cloud (/root/gdrive)"
+          echo "Local Storage: 100GB+ SSD"
+          echo "Cloud Storage: 5TB Google Drive (/root/gdrive)"
           echo "Domain SSH: ssh -p 22022 root@sub.velqon.ir"
           echo "Tailscale SSH: ssh root@$TAILSCALE_IP"
           echo "=========================================================="
@@ -212,12 +202,12 @@ jobs:
             echo "- **OS:** \`Debian GNU/Linux 13 (trixie)\`"
             echo "- **User:** \`root\`"
             echo "- **Password:** \`Iliya@Runner2026!\`"
-            echo "- **Local Disk:** \`$(df -h / | awk 'NR==2{print $4}') free\`"
+            echo "- **Local NVMe:** \`$(df -h / | awk 'NR==2{print $4}') free\`"
             echo "- **Cloud Drive:** \`5 TB Google Drive\` mounted at \`/root/gdrive\`"
             echo "- **Session Duration:** \`350 minutes (~6 hours)\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: '9. Keep Server Alive'
+      - name: '8. Keep Server Alive'
         shell: bash
         env:
           KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes }}
@@ -247,7 +237,7 @@ jobs:
             wait $! || true
           done
 
-      - name: '10. Save data to persistent Git storage branch'
+      - name: '9. Sync changes directly to 5TB Google Drive & Git storage'
         if: ${{ always() || cancelled() }}
         shell: bash
         env:
@@ -256,6 +246,13 @@ jobs:
         run: |
           set -uo pipefail
           TARGET_DIR="/debian-root"
+          echo '=== Saving changed files to 5TB Google Drive ==='
+          if [[ -d "/mnt/gdrive" ]]; then
+            sudo mkdir -p /mnt/gdrive/runner_os/projects_backup
+            sudo rsync -av --delete "$TARGET_DIR/root/projects/" /mnt/gdrive/runner_os/projects_backup/ 2>/dev/null || true
+            echo 'Changes synced to 5TB Google Drive successfully!'
+          fi
+
           echo '=== Saving persistent Debian data to branch runner-storage ==='
           GIT_DIR="/tmp/git-sync"
           rm -rf "$GIT_DIR"
@@ -286,7 +283,7 @@ jobs:
             sudo cp -a "$TARGET_DIR/root/.hermes/skills" "$GIT_DIR/.hermes/" 2>/dev/null || true
           fi
 
-          echo "Last run completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC') by run #${{ github.run_number }} (Debian 5TB)" > "$GIT_DIR/LAST_RUN.txt"
+          echo "Last run completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC') by run #${{ github.run_number }} (Debian 5TB GDrive)" > "$GIT_DIR/LAST_RUN.txt"
 
           sudo chown -R "$(id -u):$(id -g)" "$GIT_DIR"
           cd "$GIT_DIR"
@@ -300,28 +297,7 @@ jobs:
             echo 'Storage already up to date.'
           fi
 
-      - name: '11. Compress and save complete Debian root cache'
-        if: ${{ always() || cancelled() }}
-        id: prepare-cache
-        shell: bash
-        run: |
-          set -euo pipefail
-          TARGET_DIR="/debian-root"
-          ARCHIVE='${{ runner.temp }}/root-archive.tar.zst'
-          rm -f "$ARCHIVE"
-
-          echo 'Compressing Debian /root state with zstd (excluding cloud mount)...'
-          sudo tar -I 'zstd -3 -T0' --exclude="$TARGET_DIR/root/gdrive" --exclude="$TARGET_DIR/root/.cache" -cf "$ARCHIVE" -C "$TARGET_DIR" root || true
-          echo "Archive created: $(ls -lh "$ARCHIVE" | awk '{print $5}')"
-
-      - name: '12. Save Actions Cache'
-        if: ${{ always() || cancelled() }}
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/root-archive.tar.zst
-          key: debian-root-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
-
-      - name: '13. Auto-restart workflow (if enabled)'
+      - name: '10. Auto-restart workflow (if enabled)'
         if: ${{ always() && inputs.auto_restart == 'yes' && !cancelled() }}
         shell: bash
         env:
