@@ -1,16 +1,16 @@
-name: 'Ubuntu SSH over Tailscale v6 (Persistent)'
-run-name: 'Ubuntu SSH #${{ github.run_number }} - ${{ inputs.keep_alive_minutes }} min'
+name: 'Ubuntu Root Server (Unified Disk & Domain SSH)'
+run-name: 'Ubuntu Root #${{ github.run_number }} - ${{ inputs.keep_alive_minutes }} min'
 
 on:
   workflow_dispatch:
     inputs:
       keep_alive_minutes:
-        description: 'How many minutes to keep Ubuntu alive (5, 10, 60, 180, 300, etc.)'
+        description: 'How many minutes to keep alive (5, 60, 180, 360)'
         required: true
         type: string
         default: '60'
       auto_restart:
-        description: 'Auto-restart this workflow after completion? (yes/no)'
+        description: 'Auto-restart workflow on finish? (yes/no)'
         required: true
         type: choice
         options:
@@ -23,7 +23,7 @@ permissions:
   actions: write
 
 jobs:
-  ssh-server:
+  root-server:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -33,231 +33,142 @@ jobs:
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: '2. Install and configure SSH'
+      - name: '2. Maximize and unify disk space'
         shell: bash
         run: |
           set -euo pipefail
+          echo '=== Freeing unused disk space for unified root partition ==='
+          df -h /
+          # Free bloat (Android SDK, dotnet, large pre-installed dev packages)
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell 2>/dev/null || true
+          sudo docker system prune -af --volumes 2>/dev/null || true
+          echo '=== Disk Space after Cleanup ==='
+          df -h /
 
-          SSH_USERNAME='iliya'
-          SSH_PASSWORD='Rdp!2024#Secure'
+      - name: '3. Configure direct Root SSH access'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT_PASS='Iliya@Runner2026!'
 
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server zstd git jq curl
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server zstd git jq curl autossh
 
-          if ! id "$SSH_USERNAME" >/dev/null 2>&1; then
-            sudo useradd --create-home --shell /bin/bash "$SSH_USERNAME"
-          fi
-
-          echo "$SSH_USERNAME:$SSH_PASSWORD" | sudo chpasswd
-          sudo usermod -aG sudo "$SSH_USERNAME"
-          sudo install -d -o "$SSH_USERNAME" -g "$SSH_USERNAME" -m 0755 \
-            "/home/$SSH_USERNAME/projects"
-          echo "$SSH_USERNAME ALL=(ALL) NOPASSWD:ALL" | \
-            sudo tee /etc/sudoers.d/90-github-ssh-user >/dev/null
-          sudo chmod 0440 /etc/sudoers.d/90-github-ssh-user
+          # Set root password and configure SSH for direct root login
+          echo "root:$ROOT_PASS" | sudo chpasswd
 
           sudo install -d -m 0755 /run/sshd
           sudo install -d -m 0755 /etc/ssh/sshd_config.d
-          printf '%s\n' \
-            'PasswordAuthentication yes' \
-            'KbdInteractiveAuthentication yes' \
-            'PermitRootLogin no' \
-            'UsePAM yes' | sudo tee /etc/ssh/sshd_config.d/99-github-runner.conf >/dev/null
+
+          sudo tee /etc/ssh/sshd_config.d/99-root-access.conf >/dev/null <<'CONF'
+          PermitRootLogin yes
+          PasswordAuthentication yes
+          KbdInteractiveAuthentication yes
+          UsePAM yes
+          ClientAliveInterval 30
+          ClientAliveCountMax 10
+          CONF
 
           sudo sshd -t
           sudo systemctl restart ssh
           sudo systemctl is-active --quiet ssh
+          echo 'Root SSH is active and listening.'
 
-          echo 'SSH server is ready.'
-
-      - name: '3. Restore complete Ubuntu home cache'
-        id: hermes-cache
+      - name: '4. Restore persistent storage and root cache'
+        id: restore-cache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ runner.temp }}/hermes-archive.tar.zst
-          key: ubuntu-home-v3-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/root-archive.tar.zst
+          key: root-home-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            root-home-v1-${{ runner.os }}-
             ubuntu-home-v3-${{ runner.os }}-
-            ubuntu-home-v2-${{ runner.os }}-
 
-      - name: '4. Extract cache and restore persistent data'
+      - name: '5. Extract cache and pull Git persistent branch'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
-          set -euo pipefail
-          USER_HOME='/home/iliya'
-          ARCHIVE='${{ runner.temp }}/hermes-archive.tar.zst'
+          set -uo pipefail
+          ARCHIVE='${{ runner.temp }}/root-archive.tar.zst'
 
-          # Layer 1: Restore full cache if available
           if [[ -f "$ARCHIVE" ]]; then
-            echo 'Extracting compressed home cache...'
-            sudo tar -I zstd -xf "$ARCHIVE" -C /
-            echo 'Home cache restored successfully.'
-          else
-            echo 'No previous full cache found; checking Git persistent storage branch...'
+            echo 'Extracting compressed root cache...'
+            sudo tar -I zstd -xf "$ARCHIVE" -C / || true
           fi
 
-          # Layer 2: Restore Git storage branch for projects and hermes configs
-          TEMP_GIT="/tmp/persistent-storage"
+          # Pull Git storage branch directly to /root/projects and /root/.hermes
+          TEMP_GIT="/tmp/git-storage-pull"
           rm -rf "$TEMP_GIT"
           if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" -b runner-storage "$TEMP_GIT" 2>/dev/null; then
-            echo 'Found persistent Git storage branch. Restoring user projects and configs...'
+            echo 'Syncing files from runner-storage branch to /root...'
+            sudo mkdir -p /root/projects /root/.hermes
             if [[ -d "$TEMP_GIT/projects" ]]; then
-              sudo cp -a "$TEMP_GIT/projects/." "$USER_HOME/projects/"
+              sudo cp -a "$TEMP_GIT/projects/." /root/projects/ 2>/dev/null || true
             fi
             if [[ -d "$TEMP_GIT/.hermes" ]]; then
-              sudo mkdir -p "$USER_HOME/.hermes"
-              sudo cp -a "$TEMP_GIT/.hermes/." "$USER_HOME/.hermes/"
-            fi
-            echo 'Git storage sync complete.'
-          else
-            echo 'No runner-storage branch found yet. Will be initialized on first run completion.'
-          fi
-
-          sudo mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/projects"
-          sudo chown -R iliya:iliya "$USER_HOME"
-          sudo rm -rf "$USER_HOME/.local/state/hermes/gateway-locks"
-
-          if ! sudo grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$USER_HOME/.bashrc"; then
-            echo 'export PATH="$HOME/.local/bin:$PATH"' | sudo tee -a "$USER_HOME/.bashrc" >/dev/null
-          fi
-
-          # Verify or setup Hermes
-          if [[ -d "$USER_HOME/.hermes" ]]; then
-            if ! sudo -u iliya -H env PATH="$USER_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
-              hermes --version >/dev/null 2>&1; then
-              echo 'Rebuilding Hermes runtime...'
-              sudo rm -rf "$USER_HOME/.hermes/hermes-agent/venv"
-              sudo -u iliya -H bash -c \
-                'cd "$HOME" && unset VIRTUAL_ENV CONDA_PREFIX UV_PROJECT_ENVIRONMENT && export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" && curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup'
-            fi
-
-            if sudo test -x "$USER_HOME/.local/bin/hermes"; then
-              sudo ln -sfn "$USER_HOME/.local/bin/hermes" /usr/local/bin/hermes
+              sudo cp -a "$TEMP_GIT/.hermes/." /root/.hermes/ 2>/dev/null || true
             fi
           fi
 
-      - name: '5. Auto-start Hermes messaging gateway'
+          sudo mkdir -p /root/projects /root/.local/bin
+          sudo chmod 700 /root
+
+      - name: '6. Establish Reverse SSH Tunnel to Server 1 (Domain Access)'
+        id: domain-tunnel
         shell: bash
+        env:
+          TUNNEL_KEY: ${{ secrets.SERVER1_SSH_KEY }}
         run: |
-          set -u
-          USER_HOME='/home/iliya'
-          USER_SERVICE="$USER_HOME/.config/systemd/user/hermes-gateway.service"
-          GATEWAY_CONFIGURED='false'
+          set -uo pipefail
+          if [[ -n "$TUNNEL_KEY" ]]; then
+            echo 'Setting up Domain SSH Tunnel to sub.velqon.ir:22022...'
+            sudo mkdir -p /root/.ssh
+            echo "$TUNNEL_KEY" | sudo tee /root/.ssh/tunnel_id >/dev/null
+            sudo chmod 600 /root/.ssh/tunnel_id
 
-          if sudo test -f "$USER_SERVICE"; then
-            GATEWAY_CONFIGURED='true'
-          elif sudo grep -Eiq 'telegram|discord|slack|gateway' \
-            "$USER_HOME/.hermes/config.yaml" "$USER_HOME/.hermes/.env" 2>/dev/null; then
-            GATEWAY_CONFIGURED='true'
-          fi
-
-          if [[ "$GATEWAY_CONFIGURED" != 'true' ]]; then
-            echo 'Hermes messaging is not configured; gateway auto-start skipped.'
-            exit 0
-          fi
-
-          sudo rm -f "$USER_HOME/.config/systemd/user/default.target.wants/hermes-gateway.service"
-
-          sudo tee /etc/systemd/system/hermes-gateway-runner.service >/dev/null <<'UNIT'
-          [Unit]
-          Description=Hermes Messaging Gateway for GitHub Runner
-          After=network-online.target tailscaled.service
-          Wants=network-online.target
-
-          [Service]
-          Type=simple
-          User=iliya
-          Group=iliya
-          WorkingDirectory=/home/iliya
-          Environment=HOME=/home/iliya
-          Environment=HERMES_HOME=/home/iliya/.hermes
-          Environment=PATH=/home/iliya/.local/bin:/usr/local/bin:/usr/bin:/bin
-          ExecStart=/usr/local/bin/hermes gateway run --external-supervisor
-          Restart=always
-          RestartSec=5
-          KillMode=control-group
-
-          [Install]
-          WantedBy=multi-user.target
-          UNIT
-
-          sudo systemctl daemon-reload
-          sudo systemctl enable --now hermes-gateway-runner.service
-          sleep 5
-
-          if sudo systemctl is-active --quiet hermes-gateway-runner.service; then
-            sudo systemctl status hermes-gateway-runner.service --no-pager --lines=15
-            echo 'Hermes messaging gateway auto-start completed.'
+            # Start autossh in background to forward Server 1 port 22022 to Runner port 22
+            sudo autossh -M 0 -f -N -o "StrictHostKeyChecking=no" -o "ServerAliveInterval=30" -o "ServerAliveCountMax=3" -i /root/.ssh/tunnel_id -R 0.0.0.0:22022:127.0.0.1:22 root@3.148.103.248 || true
+            echo 'Domain tunnel established! You can connect via: ssh root@sub.velqon.ir -p 22022'
           else
-            echo 'WARNING: Hermes system gateway failed; SSH will remain available.'
-            sudo journalctl -u hermes-gateway-runner.service --no-pager -n 50 || true
+            echo 'No TUNNEL_KEY provided; skipping domain bridge.'
           fi
 
-      - name: '6. Create connection information'
+      - name: '7. Connection Output'
         id: connection
         shell: bash
         run: |
           set -euo pipefail
-          TAILSCALE_IP="$(tailscale ip -4 | head -n 1)"
-          if [[ -z "$TAILSCALE_IP" ]]; then
-            echo 'Tailscale IPv4 address is missing.' >&2
-            exit 1
-          fi
-
-          CONNECTION_FILE="$RUNNER_TEMP/ubuntu-ssh-connection.txt"
-          {
-            echo 'UBUNTU SSH CONNECTION'
-            echo '====================='
-            echo "IP: $TAILSCALE_IP"
-            echo 'Port: 22'
-            echo 'Username: iliya'
-            echo 'Password: Rdp!2024#Secure'
-            echo
-            echo 'PowerShell / Bash command:'
-            echo "ssh -o StrictHostKeyChecking=accept-new iliya@$TAILSCALE_IP"
-          } > "$CONNECTION_FILE"
-
-          echo "ip=$TAILSCALE_IP" >> "$GITHUB_OUTPUT"
-          echo "file=$CONNECTION_FILE" >> "$GITHUB_OUTPUT"
+          TAILSCALE_IP="$(tailscale ip -4 | head -n 1 || echo 'N/A')"
+          
+          echo "=========================================================="
+          echo "🚀 ROOT UBUNTU SERVER READY"
+          echo "----------------------------------------------------------"
+          echo "User: root"
+          echo "Password: Iliya@Runner2026!"
+          echo "Tailscale IP: $TAILSCALE_IP"
+          echo "SSH Command: ssh root@$TAILSCALE_IP"
+          echo "=========================================================="
 
           {
-            echo '## 🚀 Ubuntu SSH is ready'
+            echo "## 🚀 Root Server is Ready"
             echo
-            echo '```powershell'
-            echo "ssh -o StrictHostKeyChecking=accept-new iliya@$TAILSCALE_IP"
+            echo '```bash'
+            echo "ssh -o StrictHostKeyChecking=accept-new root@$TAILSCALE_IP"
             echo '```'
             echo
-            echo '- IP: `'"$TAILSCALE_IP"'`'
-            echo '- Username: `iliya`'
-            echo '- Password: `Rdp!2024#Secure`'
+            echo "- **User:** \`root\`"
+            echo "- **Password:** \`Iliya@Runner2026!\`"
+            echo "- **Disk Space:** \`$(df -h / | awk 'NR==2{print $4}') free\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: '7. Output SSH Command'
-        shell: bash
-        env:
-          TAILSCALE_IP: ${{ steps.connection.outputs.ip }}
-        run: |
-          echo '=================================================================='
-          echo "ssh -o StrictHostKeyChecking=accept-new iliya@$TAILSCALE_IP"
-          echo 'Password: Rdp!2024#Secure'
-          echo '=================================================================='
+          echo "ip=$TAILSCALE_IP" >> "$GITHUB_OUTPUT"
 
-      - name: '8. Upload SSH connection file'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ubuntu-ssh-connection-${{ github.run_number }}
-          path: ${{ steps.connection.outputs.file }}
-          if-no-files-found: ignore
-          retention-days: 1
-
-      - name: '9. Keep Ubuntu alive'
+      - name: '8. Keep Server Alive'
         shell: bash
         env:
           KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes }}
-          TAILSCALE_IP: ${{ steps.connection.outputs.ip }}
         run: |
           set -euo pipefail
           TOTAL_MINUTES=$((10#$KEEP_ALIVE_MINUTES))
@@ -265,11 +176,8 @@ jobs:
           DEADLINE=$(( $(date +%s) + TOTAL_SECONDS ))
           CHECK_NUMBER=0
 
-          echo "Ubuntu SSH will remain available for $TOTAL_MINUTES minute(s)."
-
-          # Handle manual cancellation cleanly so subsequent save steps always execute
           term_handler() {
-            echo 'SIGTERM / Cancellation detected! Exiting wait loop to trigger data save steps...'
+            echo 'Cancellation / Stop signal caught! Moving directly to persistent saving...'
             exit 0
           }
           trap term_handler SIGTERM SIGINT
@@ -290,7 +198,7 @@ jobs:
             wait $! || true
           done
 
-      - name: '10. Save data to persistent Git storage branch'
+      - name: '9. Save data to persistent Git storage branch'
         if: ${{ always() || cancelled() }}
         shell: bash
         env:
@@ -309,29 +217,25 @@ jobs:
           if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" -b runner-storage "$GIT_DIR" 2>/dev/null; then
             cd "$GIT_DIR"
           else
-            echo 'Cloning branch failed, initializing fresh storage...'
             cd "$GIT_DIR"
             git init
             git checkout -b runner-storage
             git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
           fi
 
-          # Sync user projects
           mkdir -p "$GIT_DIR/projects"
-          if sudo test -d /home/iliya/projects; then
-            sudo cp -a /home/iliya/projects/. "$GIT_DIR/projects/" 2>/dev/null || true
+          if sudo test -d /root/projects; then
+            sudo cp -a /root/projects/. "$GIT_DIR/projects/" 2>/dev/null || true
           fi
 
-          # Sync essential hermes configs and memories
           mkdir -p "$GIT_DIR/.hermes"
-          if sudo test -d /home/iliya/.hermes; then
-            sudo cp -a /home/iliya/.hermes/config.yaml "$GIT_DIR/.hermes/" 2>/dev/null || true
-            sudo cp -a /home/iliya/.hermes/.env "$GIT_DIR/.hermes/" 2>/dev/null || true
-            sudo cp -a /home/iliya/.hermes/memories "$GIT_DIR/.hermes/" 2>/dev/null || true
-            sudo cp -a /home/iliya/.hermes/skills "$GIT_DIR/.hermes/" 2>/dev/null || true
+          if sudo test -d /root/.hermes; then
+            sudo cp -a /root/.hermes/config.yaml "$GIT_DIR/.hermes/" 2>/dev/null || true
+            sudo cp -a /root/.hermes/.env "$GIT_DIR/.hermes/" 2>/dev/null || true
+            sudo cp -a /root/.hermes/memories "$GIT_DIR/.hermes/" 2>/dev/null || true
+            sudo cp -a /root/.hermes/skills "$GIT_DIR/.hermes/" 2>/dev/null || true
           fi
 
-          # Always ensure a status file exists so commit is never completely empty
           echo "Last run completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC') by run #${{ github.run_number }}" > "$GIT_DIR/LAST_RUN.txt"
 
           sudo chown -R "$(id -u):$(id -g)" "$GIT_DIR"
@@ -339,58 +243,44 @@ jobs:
           git add -A
 
           if [[ -n "$(git status --porcelain)" ]]; then
-            git commit -m "Auto-save runner state from run #${{ github.run_number }}" || true
-            git push -u origin runner-storage --force || echo 'Push failed or no changes.'
-            echo 'Persistent user data committed and pushed to runner-storage branch!'
+            git commit -m "Auto-save root state from run #${{ github.run_number }}" || true
+            git push -u origin runner-storage --force || true
+            echo 'Persistent root data saved to runner-storage branch!'
           else
-            echo 'No changes detected; storage is already up to date.'
+            echo 'Storage already up to date.'
           fi
 
-      - name: '11. Compress and prepare full home cache'
-        id: prepare-cache
+      - name: '10. Compress and save complete root cache'
         if: ${{ always() || cancelled() }}
+        id: prepare-cache
         shell: bash
         run: |
           set -euo pipefail
-          ARCHIVE='${{ runner.temp }}/hermes-archive.tar.zst'
+          ARCHIVE='${{ runner.temp }}/root-archive.tar.zst'
           rm -f "$ARCHIVE"
 
-          if sudo test -d /home/iliya; then
-            echo 'Compressing /home/iliya with zstd...'
-            sudo tar -I 'zstd -3 -T0' -cf "$ARCHIVE" /home/iliya
-            echo "Archive created: $(ls -lh "$ARCHIVE" | awk '{print $5}')"
-            echo 'should_save=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'should_save=false' >> "$GITHUB_OUTPUT"
-          fi
+          echo 'Compressing /root state with zstd...'
+          sudo tar -I 'zstd -3 -T0' --exclude='/root/.cache' -cf "$ARCHIVE" /root || true
+          echo "Archive created: $(ls -lh "$ARCHIVE" | awk '{print $5}')"
 
-      - name: '12. Save Actions Cache'
-        if: ${{ (always() || cancelled()) && steps.prepare-cache.outputs.should_save == 'true' }}
+      - name: '11. Save Actions Cache'
+        if: ${{ always() || cancelled() }}
         uses: actions/cache/save@v4
         with:
-          path: ${{ runner.temp }}/hermes-archive.tar.zst
-          key: ubuntu-home-v3-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/root-archive.tar.zst
+          key: root-home-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: '13. Auto-restart workflow (if enabled)'
-        if: ${{ always() && inputs.auto_restart == 'yes' }}
+      - name: '12. Auto-restart workflow (if enabled)'
+        if: ${{ always() && inputs.auto_restart == 'yes' && !cancelled() }}
         shell: bash
         env:
           DISPATCH_TOKEN: ${{ secrets.REPO_DISPATCH_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           WF_FILE="Ubunutu.yml"
-          echo "Triggering new run of $WF_FILE..."
-
-          HTTP_CODE=$(curl -sS -o /tmp/dispatch.json -w '%{http_code}' \
-            -X POST \
+          echo "Triggering auto-restart of $WF_FILE..."
+          curl -sS -X POST \
             -H "Authorization: token $DISPATCH_TOKEN" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/${WF_FILE}/dispatches" \
-            -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"keep_alive_minutes\":\"${{ inputs.keep_alive_minutes }}\",\"auto_restart\":\"yes\"}}")
-
-          echo "Dispatch response HTTP: $HTTP_CODE"
-          if [[ "$HTTP_CODE" == "204" ]]; then
-            echo "Auto-restart triggered successfully."
-          else
-            cat /tmp/dispatch.json || true
-          fi
+            -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"keep_alive_minutes\":\"${{ inputs.keep_alive_minutes }}\",\"auto_restart\":\"yes\"}}" || true
