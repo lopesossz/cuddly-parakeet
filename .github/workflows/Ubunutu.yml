@@ -88,9 +88,10 @@ jobs:
           sudo chroot "$TARGET_DIR" usermod -s /bin/bash root
           echo "root:$ROOT_PASS" | sudo chroot "$TARGET_DIR" chpasswd -c SHA512
 
-          # Start SSH inside Debian on port 22
-          sudo chroot "$TARGET_DIR" /usr/sbin/sshd -p 22 -D &
+          # Kill host ssh if any and start Debian sshd on port 2222
+          sudo chroot "$TARGET_DIR" /usr/sbin/sshd -p 2222
           sleep 2
+          echo 'Debian sshd running on port 2222'
 
           echo 'Pure Debian environment is live with direct Root SSH on port 22!'
 
@@ -147,7 +148,7 @@ jobs:
             sudo chmod 600 /root/.ssh/tunnel_id
 
             # Autossh forwarding Server 1 port 22022 -> Debian SSH port 22
-            sudo autossh -M 0 -f -N -o "StrictHostKeyChecking=no" -o "ServerAliveInterval=30" -o "ServerAliveCountMax=3" -i /root/.ssh/tunnel_id -R 0.0.0.0:22022:127.0.0.1:22 root@3.148.103.248 || true
+            sudo autossh -M 0 -f -N -o "StrictHostKeyChecking=no" -o "ServerAliveInterval=30" -o "ServerAliveCountMax=3" -i /root/.ssh/tunnel_id -R 0.0.0.0:22022:127.0.0.1:2222 root@3.148.103.248 || true
             echo 'Domain tunnel established! You can connect via: ssh root@sub.velqon.ir -p 22022'
           fi
 
