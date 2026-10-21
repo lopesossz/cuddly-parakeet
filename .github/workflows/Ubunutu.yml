@@ -267,6 +267,13 @@ jobs:
 
           echo "Ubuntu SSH will remain available for $TOTAL_MINUTES minute(s)."
 
+          # Handle manual cancellation cleanly so subsequent save steps always execute
+          term_handler() {
+            echo 'SIGTERM / Cancellation detected! Exiting wait loop to trigger data save steps...'
+            exit 0
+          }
+          trap term_handler SIGTERM SIGINT
+
           while (( $(date +%s) < DEADLINE )); do
             CHECK_NUMBER=$((CHECK_NUMBER + 1))
             if ! sudo systemctl is-active --quiet ssh; then
@@ -279,11 +286,12 @@ jobs:
             (( REMAINING_SECONDS < 0 )) && REMAINING_SECONDS=0
             REMAINING_MINUTES=$(( (REMAINING_SECONDS + 59) / 60 ))
             echo "[$CHECK_NUMBER] Remaining=${REMAINING_MINUTES}m | RAM=$MEMORY | Disk=$DISK | Load=$LOAD"
-            sleep 60
+            sleep 60 &
+            wait $! || true
           done
 
       - name: '10. Save data to persistent Git storage branch'
-        if: ${{ always() }}
+        if: ${{ always() || cancelled() }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -333,7 +341,7 @@ jobs:
 
       - name: '11. Compress and prepare full home cache'
         id: prepare-cache
-        if: ${{ always() }}
+        if: ${{ always() || cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -350,7 +358,7 @@ jobs:
           fi
 
       - name: '12. Save Actions Cache'
-        if: ${{ always() && steps.prepare-cache.outputs.should_save == 'true' }}
+        if: ${{ (always() || cancelled()) && steps.prepare-cache.outputs.should_save == 'true' }}
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/hermes-archive.tar.zst
