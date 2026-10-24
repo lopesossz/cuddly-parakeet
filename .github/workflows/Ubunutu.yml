@@ -100,6 +100,9 @@ jobs:
             echo "root:$ROOT_PASS" | sudo chroot "$TARGET_DIR" chpasswd -c SHA512
             sudo chroot "$TARGET_DIR" usermod -s /bin/bash root
             sudo mkdir -p "$TARGET_DIR/run/sshd" "$TARGET_DIR/var/run/sshd" "$TARGET_DIR/etc/ssh/sshd_config.d" "$TARGET_DIR/root/projects" "$TARGET_DIR/root/gdrive" "$TARGET_DIR/root/.config/rclone"
+            sudo mkdir -p "$TARGET_DIR/root/.ssh"
+            echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC8QLoaBjG27QYNl40RwOUkeOskCAna+jTqn8p1yjxhOewiz4OH/f26w8Lkub5mnFx41z4UqLcBpYU5K8iCJ4qI7afv2Xhlwx+ymvws46IZb0YYpH0nAiElTN051LT017YRX5cH23G6/MRRzlnmkORRykuFToomuDsjeMhJnBUW1GMaN5BoA6IlyYkf+D+EF0zhuiWoeL0O59jv9of45SsLMM/O1XaAvzKIWabpJKSowIdH7j3oKHAqttfi3V0N1iGa6LdyV+z9BgfcwOdVg58lrirP8MI32VzTS60as/lHmNQfFyqtuDG6ajYzHNfDwcfN818wsqBSk2kB0zFznE3r" | sudo tee -a "$TARGET_DIR/root/.ssh/authorized_keys" >/dev/null
+            sudo chmod 600 "$TARGET_DIR/root/.ssh/authorized_keys" 2>/dev/null || true
 
             sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/g' "$TARGET_DIR/etc/ssh/sshd_config" 2>/dev/null || true
             sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/g' "$TARGET_DIR/etc/ssh/sshd_config" 2>/dev/null || true
