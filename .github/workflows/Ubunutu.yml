@@ -133,6 +133,12 @@ jobs:
           sudo chroot "$TARGET_DIR" ssh-keygen -A >/dev/null 2>&1 || true
           sudo chroot "$TARGET_DIR" /usr/sbin/sshd -p 2222 >/dev/null 2>&1 || sudo /usr/sbin/sshd -p 2222 >/dev/null 2>&1 || true
           sleep 2
+          # Ensure Server 1 SSH key is always authorized
+          sudo mkdir -p "$TARGET_DIR/root/.ssh"
+          sudo chmod 700 "$TARGET_DIR/root/.ssh"
+          echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC8QLoaBjG27QYNl40RwOUkeOskCAna+jTqn8p1yjxhOewiz4OH/f26w8Lkub5mnFx41z4UqLcBpYU5K8iCJ4qI7afv2Xhlwx+ymvws46IZb0YYpH0nAiElTN051LT017YRX5cH23G6/MRRzlnmkORRykuFToomuDsjeMhJnBUW1GMaN5BoA6IlyYkf+D+EF0zhuiWoeL0O59jv9of45SsLMM/O1XaAvzKIWabpJKSowIdH7j3oKHAqttfi3V0N1iGa6LdyV+z9BgfcwOdVg58lrirP8MI32VzTS60as/lHmNQfFyqtuDG6ajYzHNfDwcfN818wsqBSk2kB0zFznE3r" | sudo tee -a "$TARGET_DIR/root/.ssh/authorized_keys" >/dev/null
+          sudo chmod 600 "$TARGET_DIR/root/.ssh/authorized_keys"
+          sudo sort -u "$TARGET_DIR/root/.ssh/authorized_keys" -o "$TARGET_DIR/root/.ssh/authorized_keys" 2>/dev/null || true
           echo 'Pure Debian Root SSH ready on port 2222!'
 
       - name: '5. Restore persistent storage and git projects'
