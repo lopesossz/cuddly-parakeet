@@ -256,19 +256,3 @@ jobs:
             git push -u origin runner-storage --force >/dev/null 2>&1 || true
             echo "[Storage] Repository tracking synchronized."
           fi
-
-- name: '10. Schedule Next Cycle with Randomized Gap (15-45m)'
-        if: ${{ always() && inputs.auto_continue == 'yes' }}
-        shell: bash
-        env:
-          DISPATCH_TOKEN: ${{ secrets.REPO_DISPATCH_TOKEN || secrets.GITHUB_TOKEN }}
-        run: |
-          set -uo pipefail
-          WF_FILE="Ubunutu.yml"
-          echo "[Scheduler] Dispatching next cycle immediately for permanent 24/7 infinite loop..."
-          curl -sS -X POST \
-            -H "Authorization: token $DISPATCH_TOKEN" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/${WF_FILE}/dispatches" \
-            -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"suite_duration_minutes\":\"330\",\"auto_continue\":\"yes\"}}"
-          echo "[Scheduler] Next test run successfully dispatched!"
