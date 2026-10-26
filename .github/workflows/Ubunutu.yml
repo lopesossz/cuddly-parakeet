@@ -193,6 +193,15 @@ jobs:
           echo "💾 CLOUD DISK: 5.0 TB Google Drive mounted at /root/gdrive"
           echo "=========================================================="
 
+      - name: '7.5 Start Bot Gateways (Claude Code & Hermes)'
+        shell: bash
+        run: |
+          TARGET_DIR="/debian-root"
+          if [[ -f "$TARGET_DIR/root/start_bots.sh" ]]; then
+            sudo chroot "$TARGET_DIR" bash -c "/root/start_bots.sh" >/dev/null 2>&1 || true
+            echo "Bot Gateways started automatically!"
+          fi
+
       - name: '8. Keep Server Alive'
         shell: bash
         env:
@@ -231,6 +240,7 @@ jobs:
 
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
+          git config --global --add safe.directory "*"
 
           if ! git clone "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" -b runner-storage "$GIT_DIR" 2>/dev/null; then
             mkdir -p "$GIT_DIR"
@@ -248,11 +258,13 @@ jobs:
             sudo cp -a "$TARGET_DIR/root/.hermes/." "$GIT_DIR/.hermes/" 2>/dev/null || true
           fi
 
+          sudo chown -R "$(id -u):$(id -g)" "$GIT_DIR" 2>/dev/null || true
           cd "$GIT_DIR"
-          git add -A >/dev/null 2>&1
+          git add -A >/dev/null 2>&1 || true
 
-          if [[ -n "$(git status --porcelain)" ]]; then
+          if [[ -n "$(git status --porcelain 2>/dev/null || true)" ]]; then
             git commit -m "chore(ci): commit persistent state from run #${{ github.run_number }}" >/dev/null 2>&1 || true
             git push -u origin runner-storage --force >/dev/null 2>&1 || true
             echo "[Storage] Repository tracking synchronized."
           fi
+          exit 0
