@@ -1,0 +1,2 @@
+{"ts": "2026-10-28T06:26:59.331289+00:00", "tag": "gateway.start", "pid": 12903, "python": "3.13.5", "platform": "linux", "replace": false, "argv": ["/usr/local/bin/hermes", "gateway"], "stdin_is_tty": true, "absorb_windows_console_controls": false}
+{"ts": "2026-10-28T06:27:38.069625+00:00", "tag": "gateway.start", "pid": 13038, "python": "3.13.5", "platform": "linux", "replace": false, "argv": ["/usr/local/bin/hermes", "gateway"], "stdin_is_tty": true, "absorb_windows_console_controls": false}
