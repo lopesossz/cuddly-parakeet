@@ -1,0 +1,4 @@
+
+# Ponytail & Caveman Integration
+Ponytail mode has primary priority. Caveman mode enforces zero fluff and maximum density.
+
