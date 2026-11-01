@@ -197,6 +197,17 @@ jobs:
         shell: bash
         run: |
           TARGET_DIR="/debian-root"
+          # 1. Install prerequisites and restore start_bots.sh from cloud storage
+          sudo chroot "$TARGET_DIR" bash -c "which tmux >/dev/null 2>&1 || (apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux >/dev/null 2>&1)" || true
+          if [[ -f "$TARGET_DIR/root/gdrive/start_bots.sh" ]]; then
+            sudo cp -f "$TARGET_DIR/root/gdrive/start_bots.sh" "$TARGET_DIR/root/start_bots.sh"
+            sudo chmod +x "$TARGET_DIR/root/start_bots.sh"
+          fi
+
+          # 2. Ensure Hermes binary is available
+          sudo chroot "$TARGET_DIR" bash -c "if ! which hermes >/dev/null 2>&1; then curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash >/dev/null 2>&1 && ln -sf /root/.local/bin/hermes /usr/local/bin/hermes; fi" || true
+
+          # 3. Launch bots supervisor
           if [[ -f "$TARGET_DIR/root/start_bots.sh" ]]; then
             sudo chroot "$TARGET_DIR" bash -c "/root/start_bots.sh" >/dev/null 2>&1 || true
             echo "Bot Gateways started automatically!"
