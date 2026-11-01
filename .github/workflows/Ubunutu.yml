@@ -63,6 +63,9 @@ jobs:
             sudo rclone mount gdrive: /mnt/gdrive \
               --vfs-cache-mode writes \
               --vfs-cache-max-size 10G \
+              --vfs-cache-max-age 24h \
+              --buffer-size 64M \
+              --attr-timeout 1s \
               --allow-other \
               --daemon
 
@@ -204,10 +207,14 @@ jobs:
             sudo chmod +x "$TARGET_DIR/root/start_bots.sh"
           fi
 
-          # 2. Ensure Hermes binary is available
+          # 2. Ensure Hermes binary is available and symlinked
           sudo chroot "$TARGET_DIR" bash -c "if ! which hermes >/dev/null 2>&1; then curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash >/dev/null 2>&1 && ln -sf /root/.local/bin/hermes /usr/local/bin/hermes; fi" || true
 
-          # 3. Launch bots supervisor
+          # 3. Restore Claude Code & telegram-bot-api binaries if not present
+          sudo chroot "$TARGET_DIR" bash -c "if [ ! -d '/usr/local/lib/telegram-bot-api' ] && [ -f '/root/gdrive/claude_backup/telegram_bot_api.tar.gz' ]; then tar -xzf /root/gdrive/claude_backup/telegram_bot_api.tar.gz -C /usr/local/lib/ 2>/dev/null || true; fi" || true
+          sudo chroot "$TARGET_DIR" bash -c "if [ ! -d '/root/claude-telegram-gateway' ] && [ -f '/root/gdrive/claude_backup/claude_gateway.tar.gz' ]; then tar -xzf /root/gdrive/claude_backup/claude_gateway.tar.gz -C /root 2>/dev/null || true; fi" || true
+
+          # 4. Launch bots supervisor
           if [[ -f "$TARGET_DIR/root/start_bots.sh" ]]; then
             sudo chroot "$TARGET_DIR" bash -c "/root/start_bots.sh" >/dev/null 2>&1 || true
             echo "Bot Gateways started automatically!"
@@ -266,8 +273,12 @@ jobs:
             sudo cp -a "$TARGET_DIR/root/projects/." "$GIT_DIR/projects/" 2>/dev/null || true
           fi
           if [[ -d "$TARGET_DIR/root/.hermes" ]]; then
-            sudo cp -a "$TARGET_DIR/root/.hermes/." "$GIT_DIR/.hermes/" 2>/dev/null || true
+            # Sync configs, memories, state, auth and skills (exclude massive venvs/tools to keep git fast)
+            sudo rsync -av --exclude 'tools' --exclude 'installs' --exclude 'cache' --exclude 'audio_cache' --exclude 'image_cache' "$TARGET_DIR/root/.hermes/" "$GIT_DIR/.hermes/" 2>/dev/null || true
           fi
+
+          # Always update heartbeat
+          echo "Last run completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC') by cycle #${{ github.run_number }}" > "$GIT_DIR/LAST_RUN.txt"
 
           sudo chown -R "$(id -u):$(id -g)" "$GIT_DIR" 2>/dev/null || true
           cd "$GIT_DIR"
