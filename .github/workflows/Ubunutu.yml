@@ -163,6 +163,15 @@ jobs:
         run: |
           set -uo pipefail
           TARGET_DIR="/debian-root"
+          GDRIVE_STATE="/mnt/gdrive/runner_os/bot_state.tar.zst"
+
+          echo '=== Checking for persistent bot sessions and state ==='
+          if [[ -f "$GDRIVE_STATE" ]]; then
+            echo 'Found bot state archive on Google Drive! Restoring Hermes & Claude sessions...'
+            sudo tar -I 'zstd -T0' -xf "$GDRIVE_STATE" -C "$TARGET_DIR" 2>/dev/null || true
+            echo 'Restored bot state from Google Drive successfully!'
+          fi
+
           TEMP_GIT="/tmp/git-storage-pull"
           rm -rf "$TEMP_GIT"
           if git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" -b runner-storage "$TEMP_GIT" >/dev/null 2>&1; then
@@ -176,6 +185,10 @@ jobs:
             fi
             echo 'Restored git projects and hermes state into Debian root!'
           fi
+
+          # Clean up any stale lock/pid files so bots start cleanly
+          sudo rm -f "$TARGET_DIR/root/.hermes"/*.lock "$TARGET_DIR/root/.hermes"/*.pid "$TARGET_DIR/root/.hermes"/gateway.sock 2>/dev/null || true
+          sudo rm -f "$TARGET_DIR/root/.claude"/*.lock "$TARGET_DIR/root/.claude-telegram"/*.pid 2>/dev/null || true
 
       - name: '6. Establish Reverse SSH Tunnel to Server 1 (Domain Access)'
         id: domain-tunnel
@@ -239,9 +252,32 @@ jobs:
           TOTAL_MINUTES=$((10#$KEEP_ALIVE_MINUTES))
           TOTAL_SECONDS=$((TOTAL_MINUTES * 60))
           DEADLINE=$(( $(date +%s) + TOTAL_SECONDS ))
+          TARGET_DIR="/debian-root"
 
           term_handler() {
-            echo '[Telemetry] Graceful interrupt signal received. Saving state...'
+            echo '[Telemetry] Interrupt signal received! Saving state immediately before exit...'
+            # Signal bots to flush SQLite
+            sudo chroot "$TARGET_DIR" bash -c "tmux send-keys -t hermes-gw C-c 2>/dev/null || true; tmux send-keys -t claude-tg C-c 2>/dev/null || true" || true
+            sleep 2
+            sync
+            # Fast state backup to Google Drive
+            sudo mkdir -p /mnt/gdrive/runner_os
+            sudo tar -I 'zstd -1 -T0' \
+              --exclude="root/.hermes/cache" \
+              --exclude="root/.hermes/installs" \
+              --exclude="root/.hermes/tools" \
+              --exclude="root/.hermes/hermes-agent" \
+              --exclude="root/.cache" \
+              --exclude="root/.npm" \
+              -cf /mnt/gdrive/runner_os/bot_state.tar.zst \
+              -C "$TARGET_DIR" \
+              root/.hermes \
+              root/.claude \
+              root/.claude.json \
+              root/.claude-telegram \
+              root/projects \
+              root/.ssh 2>/dev/null || true
+            echo '[Telemetry] State saved successfully. Exiting.'
             exit 0
           }
           trap term_handler SIGTERM SIGINT
@@ -255,24 +291,43 @@ jobs:
           done
 
       - name: '9. Save full system snapshot to Google Drive & auto-continue'
-        if: ${{ always() || cancelled() }}
+        if: ${{ always() }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           AUTO_CONTINUE: ${{ inputs.auto_continue }}
           SUITE_DURATION: ${{ inputs.suite_duration_minutes }}
+          IS_CANCELLED: ${{ cancelled() }}
         run: |
           set -uo pipefail
           TARGET_DIR="/debian-root"
           SNAPSHOT_PATH="/mnt/gdrive/runner_os/debian_snapshot.tar.zst"
 
           echo "=== 1. Stopping bot services cleanly to flush SQLite WAL databases ==="
-          sudo chroot "$TARGET_DIR" bash -c "tmux send-keys -t hermes-gw C-c 2>/dev/null || true; tmux send-keys -t claude-tg C-c 2>/dev/null || true; sleep 5; tmux kill-server 2>/dev/null || true" || true
+          sudo chroot "$TARGET_DIR" bash -c "tmux send-keys -t hermes-gw C-c 2>/dev/null || true; tmux send-keys -t claude-tg C-c 2>/dev/null || true; sleep 3; tmux kill-server 2>/dev/null || true" || true
           sync
 
-          echo "=== 2. Creating full system snapshot to Google Drive ==="
+          echo "=== 2. Fast critical state backup to Google Drive (Sessions, DB, Projects) ==="
           sudo mkdir -p /mnt/gdrive/runner_os
+          sudo tar -I 'zstd -1 -T0' \
+            --exclude="root/.hermes/cache" \
+            --exclude="root/.hermes/installs" \
+            --exclude="root/.hermes/tools" \
+            --exclude="root/.hermes/hermes-agent" \
+            --exclude="root/.cache" \
+            --exclude="root/.npm" \
+            -cf /mnt/gdrive/runner_os/bot_state.tar.zst \
+            -C "$TARGET_DIR" \
+            root/.hermes \
+            root/.claude \
+            root/.claude.json \
+            root/.claude-telegram \
+            root/projects \
+            root/.ssh 2>/dev/null || true
+          echo "Bot state archive saved to /mnt/gdrive/runner_os/bot_state.tar.zst!"
+
+          echo "=== 3. Creating full system snapshot to Google Drive ==="
           sudo tar -I 'zstd -3 -T0' \
             --exclude="root/gdrive" \
             --exclude="mnt/gdrive" \
@@ -291,8 +346,10 @@ jobs:
             echo "Snapshot creation failed or file empty!"
           fi
 
-          echo "=== 3. Auto-continue check ==="
-          if [[ "${AUTO_CONTINUE:-yes}" == "yes" ]]; then
+          echo "=== 4. Auto-continue check ==="
+          if [[ "$IS_CANCELLED" == "true" ]]; then
+            echo "Pipeline was manually cancelled. Skipping auto-continue to keep runner stopped."
+          elif [[ "${AUTO_CONTINUE:-yes}" == "yes" ]]; then
             echo "Triggering next runner cycle via GitHub Actions..."
             gh workflow run Ubunutu.yml -R "$REPO" -f suite_duration_minutes="${SUITE_DURATION:-330}" -f auto_continue="yes" || true
           fi
