@@ -201,22 +201,22 @@ jobs:
         run: |
           TARGET_DIR="/debian-root"
           # 1. Install prerequisites and restore start_bots.sh from cloud storage
-          sudo chroot "" bash -c "which tmux >/dev/null 2>&1 || (apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux >/dev/null 2>&1)" || true
-          sudo chroot "" bash -c "if [ -f /root/gdrive/start_bots.sh ]; then cp -f /root/gdrive/start_bots.sh /root/start_bots.sh && chmod +x /root/start_bots.sh; fi" || true
+          sudo chroot "/debian-root" bash -c "which tmux >/dev/null 2>&1 || (apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux >/dev/null 2>&1)" || true
+          sudo chroot "/debian-root" bash -c "if [ -f /root/gdrive/start_bots.sh ]; then cp -f /root/gdrive/start_bots.sh /root/start_bots.sh && chmod +x /root/start_bots.sh; fi" || true
 
           # 2. Ensure Hermes binary is available and symlinked
-          sudo chroot "" bash -c "if ! which hermes >/dev/null 2>&1; then curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash >/dev/null 2>&1 && ln -sf /root/.local/bin/hermes /usr/local/bin/hermes; fi" || true
+          sudo chroot "/debian-root" bash -c "if ! which hermes >/dev/null 2>&1; then curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash >/dev/null 2>&1 && ln -sf /root/.local/bin/hermes /usr/local/bin/hermes; fi" || true
 
           # 2.5 Ensure Moli headless browser is restored and executable
-          sudo chroot "" bash -c "if [ ! -f '/usr/local/bin/moli' ] && [ -f '/root/gdrive/runner_os/moli' ]; then mkdir -p /root/.local/bin /usr/local/bin; cp -f /root/gdrive/runner_os/moli /usr/local/bin/moli && cp -f /root/gdrive/runner_os/moli /root/.local/bin/moli && chmod +x /usr/local/bin/moli /root/.local/bin/moli; fi; if which moli >/dev/null 2>&1; then ldd $(which moli) 2>/dev/null | grep -q 'not found' && (apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libfontconfig1 >/dev/null 2>&1 || true); fi" || true
+          sudo chroot "/debian-root" bash -c "if [ ! -f '/usr/local/bin/moli' ] && [ -f '/root/gdrive/runner_os/moli' ]; then mkdir -p /root/.local/bin /usr/local/bin; cp -f /root/gdrive/runner_os/moli /usr/local/bin/moli && cp -f /root/gdrive/runner_os/moli /root/.local/bin/moli && chmod +x /usr/local/bin/moli /root/.local/bin/moli; fi; if which moli >/dev/null 2>&1; then ldd \$(which moli) 2>/dev/null | grep -q 'not found' && (apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libfontconfig1 >/dev/null 2>&1 || true); fi" || true
 
           # 3. Restore Claude Code & telegram-bot-api binaries if not present
-          sudo chroot "" bash -c "if [ ! -d '/usr/local/lib/telegram-bot-api' ] && [ -f '/root/gdrive/claude_backup/telegram_bot_api.tar.gz' ]; then tar -xzf /root/gdrive/claude_backup/telegram_bot_api.tar.gz -C /usr/local/lib/ 2>/dev/null || true; fi" || true
-          sudo chroot "" bash -c "if [ ! -d '/root/claude-telegram-gateway' ] && [ -f '/root/gdrive/claude_backup/claude_gateway.tar.gz' ]; then tar -xzf /root/gdrive/claude_backup/claude_gateway.tar.gz -C /root 2>/dev/null || true; fi" || true
-          sudo chroot "" bash -c "if ! which claude >/dev/null 2>&1; then which npm >/dev/null 2>&1 || (apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs npm >/dev/null 2>&1); npm install -g @anthropic-ai/claude-code >/dev/null 2>&1; fi" || true
+          sudo chroot "/debian-root" bash -c "if [ ! -d '/usr/local/lib/telegram-bot-api' ] && [ -f '/root/gdrive/claude_backup/telegram_bot_api.tar.gz' ]; then tar -xzf /root/gdrive/claude_backup/telegram_bot_api.tar.gz -C /usr/local/lib/ 2>/dev/null || true; fi" || true
+          sudo chroot "/debian-root" bash -c "if [ ! -d '/root/claude-telegram-gateway' ] && [ -f '/root/gdrive/claude_backup/claude_gateway.tar.gz' ]; then tar -xzf /root/gdrive/claude_backup/claude_gateway.tar.gz -C /root 2>/dev/null || true; fi" || true
+          sudo chroot "/debian-root" bash -c "if ! which claude >/dev/null 2>&1; then which npm >/dev/null 2>&1 || (apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs npm >/dev/null 2>&1); npm install -g @anthropic-ai/claude-code >/dev/null 2>&1; fi" || true
 
           # 4. Launch bots supervisor directly inside chroot as root
-          sudo chroot "" bash -c "if [ -f /root/start_bots.sh ]; then /root/start_bots.sh; elif [ -f /root/gdrive/start_bots.sh ]; then /root/gdrive/start_bots.sh; fi" || true
+          sudo chroot "/debian-root" bash -c "if [ -f /root/start_bots.sh ]; then /root/start_bots.sh; elif [ -f /root/gdrive/start_bots.sh ]; then /root/gdrive/start_bots.sh; fi" || true
           echo "Bot Gateways started automatically!"
 
       - name: '8. Keep Server Alive'
