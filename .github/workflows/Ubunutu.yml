@@ -298,7 +298,7 @@ jobs:
           REPO: ${{ github.repository }}
           AUTO_CONTINUE: ${{ inputs.auto_continue }}
           SUITE_DURATION: ${{ inputs.suite_duration_minutes }}
-          IS_CANCELLED: ${{ cancelled() }}
+          IS_CANCELLED: ${{ job.status == 'cancelled' }}
         run: |
           set -uo pipefail
           TARGET_DIR="/debian-root"
